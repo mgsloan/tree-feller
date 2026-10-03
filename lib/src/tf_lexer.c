@@ -119,18 +119,42 @@ static void tf_lexer__get_chunk_lookahead(TFLexer *self) {
   if (self->data.lookahead == TF_DECODE_ERROR) self->lookahead_size = 1;
 }
 
+static bool tf_lexer__range_matches_seek(const TFInput *input, uint32_t index, uint32_t byte) {
+  if (index >= input->included_range_count) return false;
+  const TFRange *range = &input->included_ranges[index];
+  return range->start_byte != range->end_byte && byte < range->end_byte &&
+         (index == 0 || input->included_ranges[index - 1].end_byte <= byte);
+}
+
+static uint32_t tf_lexer__find_range(const TFLexer *self, uint32_t byte) {
+  const TFInput *input = &self->input->input;
+  uint32_t count = input->included_range_count;
+  uint32_t index = self->range_index;
+  if (tf_lexer__range_matches_seek(input, index, byte)) return index;
+  if (index > 0 && tf_lexer__range_matches_seek(input, index - 1, byte)) return index - 1;
+  if (index < count && tf_lexer__range_matches_seek(input, index + 1, byte)) return index + 1;
+
+  // End offsets are sorted, including empty ranges. Empty ranges themselves
+  // cannot be part of the binary-search predicate: they may precede a match.
+  uint32_t first = 0, end = count;
+  while (first < end) {
+    uint32_t middle = first + (end - first) / 2;
+    if (input->included_ranges[middle].end_byte <= byte) first = middle + 1;
+    else end = middle;
+  }
+  while (first < count &&
+         input->included_ranges[first].start_byte == input->included_ranges[first].end_byte) {
+    first++;
+  }
+  return first;
+}
+
 void tf_lexer_seek(TFLexer *self, uint32_t byte, TFPoint point) {
   self->byte = byte;
   self->point = point;
   if (self->input && self->input->input.included_range_count) {
     const TFInput *input = &self->input->input;
-    self->range_index = 0;
-    while (self->range_index < input->included_range_count &&
-           (input->included_ranges[self->range_index].end_byte <= byte ||
-            input->included_ranges[self->range_index].start_byte ==
-                input->included_ranges[self->range_index].end_byte)) {
-      self->range_index++;
-    }
+    self->range_index = tf_lexer__find_range(self, byte);
     if (self->range_index == input->included_range_count) {
       const TFRange *last = &input->included_ranges[input->included_range_count - 1];
       self->byte = last->end_byte;
