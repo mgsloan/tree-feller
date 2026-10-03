@@ -16,23 +16,15 @@ static bool tf_language__is_repeat_shift(TSParseAction action) {
   return action.type == TSParseActionTypeShift && action.shift.repetition;
 }
 
-// Walk every (state, terminal) pair to find the extent of `parse_actions`, which
-// the TSLanguage does not carry a length for.
-static uint32_t tf_language__action_table_extent(const TSLanguage *ts, const TFLanguage *probe) {
-  uint32_t extent = 1;  // index 0 is the shared empty entry
-  for (uint32_t state = 0; state < ts->state_count; state++) {
-    for (uint32_t symbol = 0; symbol < ts->token_count; symbol++) {
-      uint32_t index = tf_lookup(probe, (TSStateId)state, symbol);
-      if (index == 0) {
-        continue;
-      }
-      uint32_t end = index + 1 + ts->parse_actions[index].entry.count;
-      if (end > extent) {
-        extent = end;
-      }
-    }
-  }
-  return extent;
+// Parse-table action indexes are u16. Track even empty/all-repeat lists so
+// each referenced header and action run is visited only once.
+static void tf_language__record_action(const TSLanguage *ts, uint16_t index,
+                                       uint8_t *references, uint32_t *extent) {
+  uint8_t bit = (uint8_t)(1U << (index % 8));
+  if (index == 0 || (references[index / 8] & bit)) return;
+  references[index / 8] |= bit;
+  uint32_t end = (uint32_t)index + 1 + ts->parse_actions[index].entry.count;
+  if (end > *extent) *extent = end;
 }
 
 TFLanguage *tf_language_load_parser(const TSLanguage *ts, const char **error) {
@@ -95,9 +87,17 @@ TFLanguage *tf_language_load_parser(const TSLanguage *ts, const char **error) {
     goto oom;
   }
   self->dense = dense;
+  uint8_t references[UINT16_MAX / 8 + 1] = {0};
+  uint32_t extent = 1;  // index 0 is the shared empty entry
   // Dense states are already in this layout.
   memcpy(dense, ts->parse_table,
          (size_t)ts->large_state_count * ts->symbol_count * sizeof(uint16_t));
+  for (uint32_t state = 0; state < ts->large_state_count; state++) {
+    const uint16_t *row = ts->parse_table + (size_t)state * ts->symbol_count;
+    for (uint32_t symbol = 0; symbol < ts->token_count; symbol++) {
+      tf_language__record_action(ts, row[symbol], references, &extent);
+    }
+  }
   for (uint32_t state = ts->large_state_count; state < ts->state_count; state++) {
     const uint16_t *data =
         &ts->small_parse_table[ts->small_parse_table_map[state - ts->large_state_count]];
@@ -106,13 +106,18 @@ TFLanguage *tf_language_load_parser(const TSLanguage *ts, const char **error) {
     for (unsigned i = 0; i < group_count; i++) {
       uint16_t section_value = *(data++);
       uint16_t symbol_count = *(data++);
+      bool terminal = false;
       for (unsigned j = 0; j < symbol_count; j++) {
-        row[*(data++)] = section_value;
+        uint16_t symbol = *(data++);
+        row[symbol] = section_value;
+        terminal |= symbol < ts->token_count;
+      }
+      if (terminal) {
+        tf_language__record_action(ts, section_value, references, &extent);
       }
     }
   }
 
-  uint32_t extent = tf_language__action_table_extent(ts, self);
   uint8_t *counts = calloc(extent, sizeof(uint8_t));
   if (!counts) {
     goto oom;
@@ -122,35 +127,21 @@ TFLanguage *tf_language_load_parser(const TSLanguage *ts, const char **error) {
   // Fill in the filtered counts. Truncating the count only works if the kept
   // actions form a prefix of the entry, which holds for every grammar seen so
   // far; refuse to guess if it ever stops holding.
-  for (uint32_t state = 0; state < ts->state_count; state++) {
-    for (uint32_t symbol = 0; symbol < ts->token_count; symbol++) {
-      uint32_t index = tf_lookup(self, (TSStateId)state, symbol);
-      if (index == 0) {
-        continue;
-      }
-      // The table said an action lives past the end of the action table. Nothing
-      // this library does can make sense of that, so do not read it.
-      if (index >= extent) {
-        *error = "parse table refers to an action index that does not exist";
+  for (uint32_t index = 1; index < extent && index <= UINT16_MAX; index++) {
+    if (!(references[index / 8] & (1U << (index % 8)))) continue;
+    uint32_t count = ts->parse_actions[index].entry.count;
+    const TSParseAction *actions = (const TSParseAction *)(&ts->parse_actions[index] + 1);
+    uint32_t kept = 0;
+    while (kept < count && !tf_language__is_repeat_shift(actions[kept])) {
+      kept++;
+    }
+    for (uint32_t action = kept; action < count; action++) {
+      if (!tf_language__is_repeat_shift(actions[action])) {
+        *error = "SHIFT_REPEAT actions are not trailing in an action entry";
         goto fail;
       }
-      if (counts[index] != 0) {
-        continue;
-      }
-      uint32_t count = ts->parse_actions[index].entry.count;
-      const TSParseAction *actions = (const TSParseAction *)(&ts->parse_actions[index] + 1);
-      uint32_t kept = 0;
-      while (kept < count && !tf_language__is_repeat_shift(actions[kept])) {
-        kept++;
-      }
-      for (uint32_t i = kept; i < count; i++) {
-        if (!tf_language__is_repeat_shift(actions[i])) {
-          *error = "SHIFT_REPEAT actions are not trailing in an action entry";
-          goto fail;
-        }
-      }
-      counts[index] = (uint8_t)kept;
     }
+    counts[index] = (uint8_t)kept;
   }
 
   // `state_count` is rejected above if it is zero, but the analyser loses that
