@@ -24,8 +24,8 @@
 
 // Value-free graph-structured stacks for speculative parsing. Included by
 // tf_parser.c so the ordinary shift/reduce path and its sink remain private.
-// The algorithms follow tree-sitter 0.27's stack.c and parser.c; error recovery
-// and incremental reuse are deliberately absent.
+// The algorithms follow tree-sitter 0.27's stack.c and parser.c. Failed
+// alternatives return to the ordinary driver's recovery; incremental reuse is absent.
 #ifndef TF_PARSER_SPEC_H
 #define TF_PARSER_SPEC_H
 
@@ -297,6 +297,7 @@ static void tf_spec__extend(TFSpec *s) {
   uint32_t byte = i ? p->nodes[i - 1].end_byte : 0;
   TFPoint point = i ? p->nodes[i - 1].end_point : (TFPoint){0, 0};
   uint32_t tree = tf_spec__tree(s, (TFSpecTree){.token = {.symbol = n.symbol,
+                                                          .missing = n.missing,
                                                           .start_byte = n.start_byte,
                                                           .end_byte = n.end_byte,
                                                           .start_point = n.start_point,
@@ -1055,7 +1056,8 @@ static bool tf_spec__capture(TFSpec *c, TFParser *p, const TFToken *token) {
   return true;
 }
 
-static bool tf_parser__split(TFParser *p, TFToken token, TFToken *next) {
+static bool tf_parser__split(TFParser *p, TFToken token, TFToken *next, bool *fallback) {
+  *fallback = false;
   p->split_count++;
   // A replay whose collector ran out of memory has nothing left to find.
   if (p->capture && (p->capture->failed || tf_spec__capture(p->capture, p, &token))) {
@@ -1087,6 +1089,10 @@ static bool tf_parser__split(TFParser *p, TFToken token, TFToken *next) {
     s->cached_after = tf_spec__save_scanner(s, tf_scanner_state(p->lexer.scanner));
     if (s->failed) goto oom;
   }
+  uint32_t fork_before = s->cached_before, fork_after = s->cached_after;
+  bool fork_external = s->cached_external;
+  bool fork_keyword = p->lexer.token_is_keyword;
+  TSStateId fork_lex_state = p->lexer.token_lex_state;
   s->has_error = false;
   s->finished = TF_SPEC_NONE;
   s->owner = p;
@@ -1141,14 +1147,22 @@ static bool tf_parser__split(TFParser *p, TFToken token, TFToken *next) {
       break;
     }
     if (!s->head_count) {
-      if (s->error_is_lex) {
-        tf_parser__fail(p, s->error_byte, s->error_point, "unexpected character");
-      } else {
-        TFToken bad = {
-            .symbol = s->error_symbol, .start_byte = s->error_byte, .start_point = s->error_point};
-        tf_parser__fail_unexpected(p, s->error_state, &bad);
+      // Every alternative needs recovery. Select the first table action at the
+      // fork and let the ordinary driver repair it without speculative callbacks.
+      tf_lexer_seek(&p->lexer, token.end_byte, token.end_point);
+      p->lexer.token_is_keyword = fork_keyword;
+      p->lexer.token_lex_state = fork_lex_state;
+      if (p->lexer.scanner) {
+        TFScanner *scanner = p->lexer.scanner;
+        scanner->before = 0;
+        scanner->current = fork_external;
+        tf_spec__load_scanner(s, fork_before, tf_scanner_before(scanner));
+        tf_spec__load_scanner(s, fork_after, tf_scanner_state(scanner));
+        scanner->token_external = fork_external;
       }
-      return false;
+      *next = token;
+      *fallback = true;
+      return true;
     }
     if (s->head_count == 1 && s->finished == TF_SPEC_NONE && tf_spec__unique(s, s->heads[0].node)) {
       top = s->heads[0].node;

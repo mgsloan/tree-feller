@@ -37,6 +37,7 @@ struct TFParser {
   // Set on a private replay, which stops at this split's fork; see tf_spec__capture.
   TFSpec *capture;
   TFScanner *scanner;
+  uint32_t repair_byte, repair_count;
 };
 
 static bool tf_parser__grow(TFParser *self, uint32_t needed) {
@@ -89,6 +90,7 @@ static bool tf_parser__shift(TFParser *self, const TFToken *token, bool extra, T
   TFNode node = {
       .symbol = token->symbol,
       .extra = extra,
+      .missing = token->missing,
       .start_byte = token->start_byte,
       .end_byte = token->end_byte,
       .start_point = token->start_point,
@@ -113,42 +115,6 @@ static void tf_parser__fail(TFParser *self, uint32_t byte, TFPoint point, const 
   va_end(args);
 }
 
-static const char *tf_parser__symbol_name(const TFLanguage *lang, TSSymbol symbol) {
-  const char *name = tf_language_symbol_name(lang, symbol);
-  return name ? name : "?";
-}
-
-// The tokens that would have been accepted here. tree-sitter has a lookahead
-// iterator (language.h:109-178) that exploits the small table's structure; this
-// runs once per parse, at the point where it is about to stop, so a plain scan
-// over the terminals is enough and is a tenth of the code.
-static void tf_parser__describe_expected(const TFLanguage *lang, TSStateId state, char *out,
-                                         size_t size) {
-  size_t used = 0;
-  unsigned found = 0;
-  for (uint32_t symbol = 0; symbol < lang->ts->token_count; symbol++) {
-    uint32_t count;
-    tf_actions(lang, state, symbol, &count);
-    if (count == 0) {
-      continue;
-    }
-    const char *name = tf_parser__symbol_name(lang, symbol);
-    int written = snprintf(out + used, size - used, "%s%s", found++ ? ", " : "", name);
-    if (written < 0 || (size_t)written >= size - used) {
-      snprintf(out + (used > 4 ? used - 4 : 0), size - (used > 4 ? used - 4 : 0), ", ...");
-      return;
-    }
-    used += (size_t)written;
-  }
-}
-
-static void tf_parser__fail_unexpected(TFParser *self, TSStateId state, const TFToken *token) {
-  char expected[TF_ERROR_MESSAGE_SIZE / 2] = {0};
-  tf_parser__describe_expected(self->lang, state, expected, sizeof(expected));
-  tf_parser__fail(self, token->start_byte, token->start_point, "expected one of {%s}, found %s",
-                  expected, tf_parser__symbol_name(self->lang, token->symbol));
-}
-
 // parser.c:/ts_parser__reduce/, with the GLR bookkeeping removed. Pops
 // `child_count` non-extra cells -- carrying along any extras between them --
 // hands them to the sink, and pushes the result in their place. `lookahead` is
@@ -161,6 +127,7 @@ static bool tf_parser__reduce(TFParser *self, TSSymbol symbol, uint32_t child_co
   // stack a second time.
   uint32_t popped = 0, trailing_count = 0;
   for (uint32_t structural = 0; structural < child_count;) {
+    if (popped == self->depth) return false;
     popped++;
     if (!self->nodes[self->depth - popped].extra) {
       structural++;
@@ -276,6 +243,182 @@ static bool tf_parser__demote_keyword(const TFLanguage *lang, TSStateId state, T
   return true;
 }
 
+// Recovery never invokes the sink until a repair has been selected. Bound both
+// the table search and consecutive insertions at one input position.
+#define TF_REPAIR_STEPS 32
+#define TF_REPAIR_INSERTIONS 8
+
+static bool tf_parser__repair_reduce(TFParser *self, TSParseAction action, const TFToken *token) {
+  return tf_parser__reduce(self, action.reduce.symbol, action.reduce.child_count,
+                           action.reduce.production_id, token, false);
+}
+
+// Try one missing terminal followed by the real lookahead. The scratch parser
+// has no callbacks and cannot split; ambiguity resolution remains on the real
+// parse path after inserting the selected terminal.
+static int tf_parser__insert_missing(TFParser *self, const TFToken *lookahead) {
+  static const TFSink no_sink = {0};
+  TFParser trial = {.lang = self->lang, .sink = &no_sink};
+  if (self->depth > UINT32_MAX - TF_REPAIR_STEPS ||
+      !tf_parser__grow(&trial, self->depth + TF_REPAIR_STEPS)) {
+    free(trial.states);
+    free(trial.nodes);
+    return -1;
+  }
+  TSParseAction plan[TF_REPAIR_STEPS];
+  uint32_t plan_count = 0;
+  TFToken missing = {.missing = true,
+                     .start_byte = lookahead->start_byte, .end_byte = lookahead->start_byte,
+                     .start_point = lookahead->start_point, .end_point = lookahead->start_point};
+  bool found = false;
+  const TSLanguage *language = self->lang->ts;
+  // Prefer punctuation to invented names or literals.
+  for (unsigned named = 0; named < 2 && !found; named++) {
+    for (TSSymbol symbol = 1; symbol < language->token_count && !found; symbol++) {
+      if (language->symbol_metadata[symbol].named != (bool)named) continue;
+      bool external = false;
+      for (uint32_t index = 0; index < language->external_token_count; index++) {
+        external |= language->external_scanner.symbol_map[index] == symbol;
+      }
+      if (external) continue;
+      uint32_t count;
+      tf_actions(self->lang, self->states[self->depth], symbol, &count);
+      if (!count) continue;
+      memcpy(trial.states, self->states, (self->depth + 1) * sizeof(TSStateId));
+      memcpy(trial.nodes, self->nodes, self->depth * sizeof(TFNode));
+      trial.depth = self->depth;
+      trial.leading = self->leading;
+      plan_count = 0;
+      missing.symbol = symbol;
+      bool shifted = false;
+      for (uint32_t step = 0; step < TF_REPAIR_STEPS; step++) {
+        TSStateId state = trial.states[trial.depth];
+        const TFToken *token = shifted ? lookahead : &missing;
+        const TSParseAction *actions = tf_actions(self->lang, state, token->symbol, &count);
+        if (!count || tf_lex_mode(self->lang, state).lex_state == UINT16_MAX) break;
+        TSParseAction action = actions[0];
+        if (shifted && (action.type == TSParseActionTypeShift ||
+                        action.type == TSParseActionTypeAccept)) {
+          found = true;
+          break;
+        }
+        if (!shifted) plan[plan_count++] = action;
+        if (action.type == TSParseActionTypeReduce) {
+          if (!tf_parser__repair_reduce(&trial, action, token)) break;
+        } else if (!shifted && action.type == TSParseActionTypeShift && !action.shift.extra) {
+          if (!tf_parser__shift(&trial, &missing, false, action.shift.state)) break;
+          shifted = true;
+        } else {
+          break;
+        }
+      }
+    }
+  }
+  free(trial.states);
+  free(trial.nodes);
+  if (!found) return 0;
+
+  bool external = self->lexer.scanner && self->lexer.scanner->token_external;
+  if (self->lexer.scanner) self->lexer.scanner->token_external = false;
+  bool ok = true;
+  for (uint32_t index = 0; index < plan_count && ok; index++) {
+    TSParseAction action = plan[index];
+    ok = action.type == TSParseActionTypeReduce
+        ? tf_parser__repair_reduce(self, action, &missing)
+        : tf_parser__shift(self, &missing, false, action.shift.state);
+  }
+  if (self->lexer.scanner) self->lexer.scanner->token_external = external;
+  return ok ? 1 : -1;
+}
+
+// Retain abandoned stack cells as children of an extra ERROR node. The state
+// below the run survives, so grammar reductions ignore the error's child count.
+static bool tf_parser__wrap_error(TFParser *self, uint32_t base, const TFToken *eof,
+                                  void **root) {
+  if (self->depth == UINT32_MAX || !tf_parser__grow(self, self->depth + 1)) return false;
+  uint32_t count = self->depth - base, structural = 0;
+  for (uint32_t index = base; index < self->depth; index++) {
+    structural += !self->nodes[index].extra;
+  }
+  if (eof) {
+    self->nodes[self->depth] = (TFNode){.symbol = ts_builtin_sym_end, .extra = true,
+        .start_byte = eof->start_byte, .end_byte = eof->end_byte,
+        .start_point = eof->start_point, .end_point = eof->end_point,
+        .value = tf_parser__emit_shift(self, eof, true)};
+    count++;
+  }
+  const TFNode *children = &self->nodes[base];
+  TFReduction reduction = {.symbol = ts_builtin_sym_error, .extra = eof == NULL,
+      .child_count = structural, .node_count = count, .children = children,
+      .start_byte = children[0].start_byte, .start_point = children[0].start_point,
+      .end_byte = children[count - 1].end_byte, .end_point = children[count - 1].end_point};
+  TFNode parent = {.symbol = ts_builtin_sym_error, .extra = reduction.extra,
+      .start_byte = reduction.start_byte, .end_byte = reduction.end_byte,
+      .start_point = reduction.start_point, .end_point = reduction.end_point,
+      .value = tf_parser__emit_reduce(self, &reduction)};
+  TSStateId state = self->states[base];
+  self->depth = base;
+  if (self->leading > base) self->leading = base;
+  if (parent.extra && base == self->leading) self->leading++;
+  if (!tf_parser__push(self, parent, state)) return false;
+  if (eof) {
+    self->leading = 0;
+    if (root) *root = parent.value;
+  }
+  return true;
+}
+
+typedef enum { TF_REPAIR_FAILED, TF_REPAIR_RETRY, TF_REPAIR_SKIPPED, TF_REPAIR_FINISHED } TFRepair;
+
+static TFRepair tf_parser__recover(TFParser *self, TFToken token, void **root) {
+  if (self->repair_byte != token.start_byte) {
+    self->repair_byte = token.start_byte;
+    self->repair_count = 0;
+  }
+  if (token.symbol != ts_builtin_sym_error && self->repair_count++ < TF_REPAIR_INSERTIONS) {
+    int inserted = tf_parser__insert_missing(self, &token);
+    if (inserted < 0) return TF_REPAIR_FAILED;
+    if (inserted) return TF_REPAIR_RETRY;
+
+    for (uint32_t base = self->depth; base > 0;) {
+      base--;
+      uint32_t count;
+      const TSParseAction *actions = tf_actions(self->lang, self->states[base], token.symbol, &count);
+      if (count && actions[0].type != TSParseActionTypeRecover &&
+          tf_lex_mode(self->lang, self->states[base]).lex_state != UINT16_MAX) {
+        return tf_parser__wrap_error(self, base, NULL, NULL)
+            ? TF_REPAIR_RETRY : TF_REPAIR_FAILED;
+      }
+    }
+  }
+  if (token.symbol == ts_builtin_sym_end) {
+    return tf_parser__wrap_error(self, 0, &token, root)
+        ? TF_REPAIR_FINISHED : TF_REPAIR_FAILED;
+  }
+  // Empty scanner tokens cannot be skipped by seeking to their end. Restore
+  // the incoming scanner state and consume a code point instead.
+  if (token.start_byte == token.end_byte) {
+    tf_lexer_seek(&self->lexer, token.start_byte, token.start_point);
+    if (self->lexer.scanner) self->lexer.scanner->current = self->lexer.scanner->before;
+    if (self->lexer.data.eof(&self->lexer.data)) {
+      token.symbol = ts_builtin_sym_end;
+      return tf_parser__wrap_error(self, 0, &token, root)
+          ? TF_REPAIR_FINISHED : TF_REPAIR_FAILED;
+    }
+    self->lexer.data.advance(&self->lexer.data, false);
+    token.end_byte = self->lexer.byte;
+    token.end_point = self->lexer.point;
+  }
+  if (self->depth == UINT32_MAX || !tf_parser__grow(self, self->depth + 1)) return TF_REPAIR_FAILED;
+  uint32_t base = self->depth;
+  if (!tf_parser__shift(self, &token, true, self->states[base])) return TF_REPAIR_FAILED;
+  // Lexical errors already have the right symbol and need no wrapper.
+  if (token.symbol != ts_builtin_sym_error && !tf_parser__wrap_error(self, base, NULL, NULL)) {
+    return TF_REPAIR_FAILED;
+  }
+  return TF_REPAIR_SKIPPED;
+}
+
 #include "tf_parser_spec.h"
 
 // Inline the loop twice so lexer selection costs nothing per token.
@@ -304,17 +447,25 @@ static TF_ALWAYS_INLINE bool tf_parser__parse(TFParser *self, void **root,
         if (tf_parser__demote_keyword(lang, state, &token, self->lexer.token_is_keyword)) {
           continue;
         }
-        tf_parser__fail_unexpected(self, state, &token);
-        return false;
-      }
-      if (count > 1) {
-        // The tables cannot decide here; work it out speculatively and replay.
-        if (!tf_parser__split(self, token, &token)) {
-          return false;
-        }
+        TFRepair repair = tf_parser__recover(self, token, root);
+        if (repair == TF_REPAIR_FAILED) goto oom;
+        if (repair == TF_REPAIR_FINISHED) return true;
+        if (repair == TF_REPAIR_SKIPPED) break;
         state = self->states[self->depth];
         end_of_non_terminal_extra = tf_lex_mode(lang, state).lex_state == UINT16_MAX;
         continue;
+      }
+      if (count > 1) {
+        // The tables cannot decide here; work it out speculatively and replay.
+        bool fallback;
+        if (!tf_parser__split(self, token, &token, &fallback)) {
+          return false;
+        }
+        if (!fallback) {
+          state = self->states[self->depth];
+          end_of_non_terminal_extra = tf_lex_mode(lang, state).lex_state == UINT16_MAX;
+          continue;
+        }
       }
 
       TSParseAction action = actions[0];
@@ -350,9 +501,12 @@ static TF_ALWAYS_INLINE bool tf_parser__parse(TFParser *self, void **root,
         return true;
       }
 
-      // TSParseActionTypeRecover: error recovery, which tree-feller does not do.
-      tf_parser__fail_unexpected(self, state, &token);
-      return false;
+      TFRepair repair = tf_parser__recover(self, token, root);
+      if (repair == TF_REPAIR_FAILED) goto oom;
+      if (repair == TF_REPAIR_FINISHED) return true;
+      if (repair == TF_REPAIR_SKIPPED) break;
+      state = self->states[self->depth];
+      end_of_non_terminal_extra = tf_lex_mode(lang, state).lex_state == UINT16_MAX;
     }
   }
 

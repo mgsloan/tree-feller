@@ -246,6 +246,7 @@ static void *tf_filter__on_reduce(void *payload, const TFReduction *reduction) {
           .production_id = cell.production,
           .named = named,
           .extra = child->extra,
+          .missing = child->missing,
           .start_byte = child->start_byte,
           .end_byte = child->end_byte,
           .start_point = child->start_point,

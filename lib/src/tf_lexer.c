@@ -431,9 +431,19 @@ static TF_ALWAYS_INLINE bool tf_lexer__next(TFLexer *self, TSStateId state, TFTo
     found = tf_lexer__scan(self, 0, true, external);
   }
   if (!found) {
-    return false;
+    // A failed lexer can have consumed a partial token. Return to its start
+    // and consume a code point so recovery preserves text and always advances.
+    tf_lexer_seek(self, self->token_start_byte, self->token_start_point);
+    *out = (TFToken){.symbol = ts_builtin_sym_error,
+                     .start_byte = self->byte, .start_point = self->point};
+    if (!self->data.eof(&self->data)) self->data.advance(&self->data, false);
+    out->end_byte = self->byte;
+    out->end_point = self->point;
+    if (out->start_byte == out->end_byte) out->symbol = ts_builtin_sym_end;
+    return true;
   }
 
+  out->missing = false;
   out->symbol = self->data.result_symbol;
   out->start_byte = self->token_start_byte;
   out->start_point = self->token_start_point;

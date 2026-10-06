@@ -86,8 +86,7 @@ void tf_lexer_refresh(TFLexer *self);
 void tf_lexer_seek(TFLexer *self, uint32_t byte, TFPoint point);
 
 // Lex the token that follows, in the given parse state, skipping any leading
-// `extra` characters. Returns false if no token matches, leaving the position at
-// the offending character for the caller to report.
+// `extra` characters. Unrecognized code points produce ERROR tokens and advance.
 bool tf_lexer_next(TFLexer *self, TSStateId state, TFToken *out);
 // For grammars without external tokens; excludes scanner dispatch and snapshots.
 bool tf_lexer_next_internal(TFLexer *self, TSStateId state, TFToken *out);

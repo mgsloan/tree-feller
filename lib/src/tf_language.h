@@ -42,6 +42,7 @@ struct TFLanguage {
 // of rescanning the packed one. A miss is 0 in both, because the expansion starts
 // from zeroed memory.
 static inline uint16_t tf_lookup(const TFLanguage *self, TSStateId state, TSSymbol symbol) {
+  if (symbol >= self->ts->symbol_count) return 0;
   return self->dense[(size_t)state * self->ts->symbol_count + symbol];
 }
 
@@ -157,6 +158,7 @@ static inline bool tf_is_reserved_word(const TFLanguage *self, TSStateId state, 
 // A hidden rule whose children a consumer may fold: hidden by its own metadata,
 // and not something a parent production can alias into visibility.
 static inline bool tf_foldable(const TFLanguage *self, TSSymbol symbol) {
+  if (symbol >= self->ts->symbol_count) return false;
   return !self->aliasable[symbol] && !tf_symbol_metadata(self, symbol).visible;
 }
 
