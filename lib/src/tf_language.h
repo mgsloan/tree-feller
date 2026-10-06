@@ -131,9 +131,14 @@ static inline TSSymbol tf_public_symbol(const TFLanguage *self, TSSymbol symbol)
   return self->ts->public_symbol_map[symbol];
 }
 
-// language.c:87-102. ABI 15 always stores the 3-field TSLexerMode, so the
-// pre-15 TSLexMode branch is dropped along with support for older ABIs.
+// Older grammars store two-field TSLexMode entries, with a different array stride.
 static inline TSLexerMode tf_lex_mode(const TFLanguage *self, TSStateId state) {
+  if (self->ts->abi_version < 15) {
+    TSLexMode mode = ((const TSLexMode *)self->ts->lex_modes)[state];
+    return (TSLexerMode){.lex_state = mode.lex_state,
+                         .external_lex_state = mode.external_lex_state,
+                         .reserved_word_set_id = 0};
+  }
   return self->ts->lex_modes[state];
 }
 
@@ -143,7 +148,7 @@ static inline TSLexerMode tf_lex_mode(const TFLanguage *self, TSStateId state) {
 // in a grammar that does not use `reserved`.
 static inline bool tf_is_reserved_word(const TFLanguage *self, TSStateId state, TSSymbol symbol) {
   const TSLanguage *ts = self->ts;
-  uint16_t set_id = ts->lex_modes[state].reserved_word_set_id;
+  uint16_t set_id = tf_lex_mode(self, state).reserved_word_set_id;
   if (set_id == 0) {
     return false;
   }

@@ -1,5 +1,5 @@
 // Builds a TFLanguage from a TSLanguage: checks the grammar is one this driver
-// can run (ABI 15, no empty table), then expands its packed
+// can run (ABI 13 through 15, no empty table), then expands its packed
 // tables into the arrays tf_language.h reads directly -- see there for what each
 // expansion buys and why it is safe to skip at lookup time.
 #include "tf_language.h"
@@ -38,8 +38,8 @@ TFLanguage *tf_language_load_parser(const TSLanguage *ts, const char **error) {
     *error = "language is NULL";
     return NULL;
   }
-  if (ts->abi_version != TF_ABI_VERSION) {
-    *error = "language ABI version is not 15";
+  if (ts->abi_version < TF_MIN_COMPATIBLE_ABI_VERSION || ts->abi_version > TF_ABI_VERSION) {
+    *error = "language ABI version is not between 13 and 15";
     return NULL;
   }
   // A language with no symbols or no states is not one; the allocations below

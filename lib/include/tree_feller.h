@@ -3,7 +3,7 @@
 // Drives a generated parser's lexer and tables once, emitting reductions without
 // building a CST. Only live parser state is retained.
 //
-// Pinned to tree-sitter ABI 15 (CLI 0.25 through 0.27). See README.md.
+// Supports tree-sitter language ABIs 13 through 15.
 #ifndef TREE_FELLER_H
 #define TREE_FELLER_H
 
@@ -18,7 +18,8 @@
 extern "C" {
 #endif
 
-// The ABI this library understands. `tf_language_load` rejects anything else.
+// The supported language ABI range, matching the pinned tree-sitter runtime.
+#define TF_MIN_COMPATIBLE_ABI_VERSION 13
 #define TF_ABI_VERSION 15
 
 // Layout-compatible with TSPoint. Only '\n' advances `row`; `column` counts bytes.
@@ -29,7 +30,7 @@ typedef struct {
 
 typedef struct TFLanguage TFLanguage;
 
-// Loads generated grammar tables. Requires ABI 15.
+// Loads generated grammar tables. Requires an ABI in the supported range.
 // Native external scanners are supported. `error` may be NULL.
 // `ts` must outlive the result.
 // A loaded language is immutable and shareable.
