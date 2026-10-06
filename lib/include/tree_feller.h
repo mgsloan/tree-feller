@@ -10,6 +10,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifdef TREE_FELLER_WASM
+#include "tree_sitter/api.h"
+#endif
+
 // Defines the grammar table ABI. Its nested path prevents it from shadowing a
 // grammar's copy; their shared guard lets either copy be included first.
 #include "tree_feller/tree_sitter/parser.h"
@@ -29,9 +33,10 @@ typedef struct {
 } TFPoint;
 
 typedef struct TFLanguage TFLanguage;
+typedef struct TFParser TFParser;
 
 // Loads generated grammar tables. Requires an ABI in the supported range.
-// Native external scanners are supported. `error` may be NULL.
+// Native external scanners are supported; WASM requires TREE_FELLER_WASM. `error` may be NULL.
 // `ts` must outlive the result.
 // A loaded language is immutable and shareable.
 TFLanguage *tf_language_load(const TSLanguage *ts, const char **error);
@@ -148,8 +153,15 @@ bool tf_parse_with_callback(const TFLanguage *lang, TFInput input, const TFSink 
 
 // Reusable parser storage. The language and sink are borrowed only for a call;
 // reuse is exclusive and remains valid after failure. drop_scratch/delete accept NULL.
-typedef struct TFParser TFParser;
 TFParser *tf_parser_new(void);
+#ifdef TREE_FELLER_WASM
+typedef struct TSWasmStore TSWasmStore;
+// Transfers ownership on success. Replacing a store deletes the previous one.
+// WASM languages require a store attached to a reusable parser.
+bool tf_parser_set_wasm_store(TFParser *self, TSWasmStore *store);
+TSWasmStore *tf_parser_take_wasm_store(TFParser *self);
+void tf_parser_swap_wasm_store(TFParser *left, TFParser *right);
+#endif
 void tf_parser_drop_scratch(TFParser *self);
 void tf_parser_delete(TFParser *self);
 bool tf_parser_parse(TFParser *self, const TFLanguage *lang, const void *source, size_t size,

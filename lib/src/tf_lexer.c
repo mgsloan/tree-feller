@@ -361,6 +361,15 @@ static void tf_lexer__finish(TFLexer *self) {
   }
 }
 
+static inline bool tf_lexer__wasm_error(const TFLexer *self) {
+#ifdef TREE_FELLER_WASM
+  return tf_wasm_has_error(self->wasm);
+#else
+  (void)self;
+  return false;
+#endif
+}
+
 static bool tf_lexer__external(TFLexer *self, TSStateId state, TSLexerMode mode, bool error_mode) {
   const TSLanguage *ts = self->lang->ts;
   uint32_t byte = self->byte;
@@ -369,10 +378,23 @@ static bool tf_lexer__external(TFLexer *self, TSStateId state, TSLexerMode mode,
   tf_lexer__start(self);
   const TFScannerState *before = tf_scanner_before(scanner);
   TFScannerState *after = &scanner->buffers[scanner->before ^ 1];
-  ts->external_scanner.deserialize(scanner->payload, before->data, before->length);
-  const bool *valid = ts->external_scanner.states +
-                      (size_t)mode.external_lex_state * ts->external_token_count;
-  bool found = ts->external_scanner.scan(scanner->payload, &self->data, valid);
+  bool found;
+#ifdef TREE_FELLER_WASM
+  if (self->wasm) {
+    uint32_t address = (uint32_t)(uintptr_t)scanner->payload;
+    tf_wasm_scanner_deserialize(self->wasm, address, before->data, before->length);
+    if (tf_lexer__wasm_error(self)) return false;
+    found = tf_wasm_scanner_scan(self->wasm, address,
+                                (uint32_t)mode.external_lex_state * ts->external_token_count);
+    if (tf_lexer__wasm_error(self)) return false;
+  } else
+#endif
+  {
+    ts->external_scanner.deserialize(scanner->payload, before->data, before->length);
+    const bool *valid = ts->external_scanner.states +
+                        (size_t)mode.external_lex_state * ts->external_token_count;
+    found = ts->external_scanner.scan(scanner->payload, &self->data, valid);
+  }
   tf_lexer__finish(self);
   // Scanners can mark an empty token before skipping its lookahead whitespace.
   if (self->token_end_byte < self->token_start_byte) {
@@ -380,6 +402,13 @@ static bool tf_lexer__external(TFLexer *self, TSStateId state, TSLexerMode mode,
     self->token_start_point = self->token_end_point;
   }
   if (found) {
+#ifdef TREE_FELLER_WASM
+    if (self->wasm) {
+      after->length = tf_wasm_scanner_serialize(self->wasm, (uint32_t)(uintptr_t)scanner->payload,
+                                               after->data);
+      if (tf_lexer__wasm_error(self)) return false;
+    } else
+#endif
     after->length = ts->external_scanner.serialize(scanner->payload, after->data);
     assert(after->length <= TREE_SITTER_SERIALIZATION_BUFFER_SIZE);
     TSSymbol symbol = ts->external_scanner.symbol_map[self->data.result_symbol];
@@ -405,8 +434,14 @@ static inline bool tf_lexer__scan(TFLexer *self, TSStateId state, bool error_mod
       tf_lexer__external(self, state, mode, error_mode)) {
     return true;
   }
+  if (tf_lexer__wasm_error(self)) return false;
   tf_lexer__start(self);
-  bool found = ts->lex_fn(&self->data, mode.lex_state);
+  bool found;
+#ifdef TREE_FELLER_WASM
+  if (self->wasm) found = tf_wasm_lex(self->wasm, mode.lex_state, false);
+  else
+#endif
+  found = ts->lex_fn(&self->data, mode.lex_state);
   tf_lexer__finish(self);
   return found;
 }
@@ -429,6 +464,7 @@ static TF_ALWAYS_INLINE bool tf_lexer__next(TFLexer *self, TSStateId state, TFTo
   TSStateId lex_state = state;
   for (;;) {
     if (tf_lexer__scan(self, lex_state, error_mode, external)) break;
+    if (tf_lexer__wasm_error(self)) return false;
     if (!error_mode) {
       error_mode = true;
       lex_state = 0;
@@ -475,7 +511,13 @@ static TF_ALWAYS_INLINE bool tf_lexer__next(TFLexer *self, TSStateId state, TFTo
       (!external || !self->scanner->token_external)) {
     tf_lexer_seek(self, out->start_byte, out->start_point);
     tf_lexer__start(self);
-    bool is_keyword = ts->keyword_lex_fn(&self->data, 0);
+    bool is_keyword;
+#ifdef TREE_FELLER_WASM
+    if (self->wasm) is_keyword = tf_wasm_lex(self->wasm, 0, true);
+    else
+#endif
+    is_keyword = ts->keyword_lex_fn(&self->data, 0);
+    if (tf_lexer__wasm_error(self)) return false;
     tf_lexer__finish(self);
     self->token_is_keyword = is_keyword;
     if (is_keyword && self->token_end_byte == out->end_byte &&

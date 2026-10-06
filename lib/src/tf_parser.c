@@ -45,6 +45,9 @@ struct TFParser {
   TFSpec *capture;
   TFScanner *scanner;
   TFProgress *progress;
+#ifdef TREE_FELLER_WASM
+  TFWasm *wasm;
+#endif
 };
 
 static bool tf_parser__grow(TFParser *self, uint32_t needed) {
@@ -378,6 +381,25 @@ static bool tf_parser__run(const TFLanguage *lang, const void *source, size_t si
   if (input) tf_lexer_init_with_callback(&self.lexer, lang, input);
   else tf_lexer_init(&self.lexer, lang, source, (uint32_t)size);
   bool ok = false;
+#ifdef TREE_FELLER_WASM
+  TSLexer *previous_lexer = NULL;
+  bool wasm_started = false;
+  if (ts_language_is_wasm(lang->ts)) {
+    if (capture) self.wasm = capture->owner->wasm;
+    if (!self.wasm) {
+      tf_parser__fail(&self, 0, (TFPoint){0}, "WASM language requires a WASM store");
+      return false;
+    }
+    previous_lexer = tf_wasm_lexer(self.wasm);
+    self.lexer.wasm = self.wasm;
+    if (!tf_wasm_start(self.wasm, &self.lexer.data, lang->ts, capture != NULL)) {
+      tf_wasm_finish(self.wasm, previous_lexer);
+      tf_parser__fail(&self, 0, (TFPoint){0}, "failed to instantiate WASM language");
+      return false;
+    }
+    wasm_started = true;
+  }
+#endif
   if (capture) capture->replay = &self;
   if (lang->ts->external_token_count) {
     if (!self.scanner) self.scanner = malloc(sizeof(TFScanner));
@@ -386,6 +408,12 @@ static bool tf_parser__run(const TFLanguage *lang, const void *source, size_t si
     self.scanner->current = self.scanner->before = 0;
     self.scanner->buffers[0].length = 0;
     self.scanner->token_external = false;
+#ifdef TREE_FELLER_WASM
+    if (self.lexer.wasm) {
+      self.scanner->payload = (void *)(uintptr_t)tf_wasm_scanner_create(self.wasm);
+      if (tf_wasm_has_error(self.wasm)) goto done;
+    } else
+#endif
     self.scanner->payload = lang->ts->external_scanner.create
                                 ? lang->ts->external_scanner.create() : NULL;
   }
@@ -404,14 +432,37 @@ static bool tf_parser__run(const TFLanguage *lang, const void *source, size_t si
 oom:
   tf_parser__fail(&self, 0, (TFPoint){0}, "out of memory");
 done:
-  if (progress && progress->canceled) {
-    tf_parser__fail(&self, progress->state.current_byte_offset, self.lexer.point, "parse canceled");
-    if (error) error->canceled = true;
+#ifdef TREE_FELLER_WASM
+  if (self.lexer.wasm && tf_wasm_has_error(self.wasm)) {
+    tf_parser__fail(&self, self.lexer.byte, self.lexer.point, "WASM lexer or scanner trapped");
     if (root) *root = NULL;
     ok = false;
   }
+#endif
   if (input && input->overflow) {
     tf_parser__fail(&self, self.lexer.byte, self.lexer.point, "input is larger than 4 GiB");
+    if (root) *root = NULL;
+    ok = false;
+  }
+  if (self.lexer.scanner) {
+#ifdef TREE_FELLER_WASM
+    if (self.lexer.wasm) {
+      tf_wasm_scanner_destroy(self.wasm, (uint32_t)(uintptr_t)self.lexer.scanner->payload);
+      if (tf_wasm_has_error(self.wasm)) {
+        tf_parser__fail(&self, self.lexer.byte, self.lexer.point, "WASM lexer or scanner trapped");
+        if (root) *root = NULL;
+        ok = false;
+      }
+    } else
+#endif
+    if (self.lexer.scanner->payload && lang->ts->external_scanner.destroy) {
+      lang->ts->external_scanner.destroy(self.lexer.scanner->payload);
+    }
+    self.lexer.scanner->payload = NULL;
+  }
+  if (progress && progress->canceled) {
+    tf_parser__fail(&self, progress->state.current_byte_offset, self.lexer.point, "parse canceled");
+    if (error) error->canceled = true;
     if (root) *root = NULL;
     ok = false;
   }
@@ -431,17 +482,18 @@ done:
       }
     }
   }
-  if (self.lexer.scanner) {
-    if (self.lexer.scanner->payload && lang->ts->external_scanner.destroy) {
-      lang->ts->external_scanner.destroy(self.lexer.scanner->payload);
-    }
-    self.lexer.scanner->payload = NULL;
-  }
+#ifdef TREE_FELLER_WASM
+  if (wasm_started) tf_wasm_finish(self.wasm, previous_lexer);
+#endif
   if (capture) capture->replay = NULL;
   if (storage) {
     // Retain allocations without pointers into this call's stack or source.
     *storage = (TFParser){.states = self.states, .nodes = self.nodes,
-                          .capacity = self.capacity, .spec = self.spec, .scanner = self.scanner};
+                          .capacity = self.capacity, .spec = self.spec, .scanner = self.scanner,
+#ifdef TREE_FELLER_WASM
+                          .wasm = self.wasm,
+#endif
+    };
     if (self.spec) self.spec->owner = NULL;
   } else {
     free(self.states);
@@ -528,14 +580,44 @@ void tf_parser_drop_scratch(TFParser *self) {
   free(self->nodes);
   free(self->scanner);
   tf_spec__free(self->spec);
-  *self = (TFParser){0};
+  *self = (TFParser){.capacity = 0,
+#ifdef TREE_FELLER_WASM
+      .wasm = self->wasm
+#endif
+  };
 }
 
 void tf_parser_delete(TFParser *self) {
   if (!self) return;
   tf_parser_drop_scratch(self);
+#ifdef TREE_FELLER_WASM
+  tf_wasm_delete(self->wasm);
+#endif
   free(self);
 }
+
+#ifdef TREE_FELLER_WASM
+bool tf_parser_set_wasm_store(TFParser *self, TSWasmStore *store) {
+  TFWasm *wasm = store ? tf_wasm_new(store) : NULL;
+  if (store && !wasm) return false;
+  tf_wasm_delete(self->wasm);
+  self->wasm = wasm;
+  return true;
+}
+
+TSWasmStore *tf_parser_take_wasm_store(TFParser *self) {
+  TSWasmStore *store = tf_wasm_take_store(self->wasm);
+  tf_wasm_delete(self->wasm);
+  self->wasm = NULL;
+  return store;
+}
+
+void tf_parser_swap_wasm_store(TFParser *left, TFParser *right) {
+  TFWasm *wasm = left->wasm;
+  left->wasm = right->wasm;
+  right->wasm = wasm;
+}
+#endif
 
 bool tf_parser_parse(TFParser *self, const TFLanguage *lang, const void *source, size_t size,
                      const TFSink *sink, void **root, TFError *error) {

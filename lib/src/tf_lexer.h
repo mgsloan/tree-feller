@@ -7,6 +7,9 @@
 #define TF_LEXER_H
 
 #include "tf_language.h"
+#ifdef TREE_FELLER_WASM
+#include "tf_wasm.h"
+#endif
 
 #if defined(__GNUC__) || defined(__clang__)
 #define TF_ALWAYS_INLINE inline __attribute__((always_inline))
@@ -75,6 +78,9 @@ typedef struct {
   TFScanner *scanner;
   uint32_t range_index;
   bool disallow_empty;  // no progress since the last parse error
+#ifdef TREE_FELLER_WASM
+  TFWasm *wasm;
+#endif
 } TFLexer;
 
 // The source is one contiguous buffer, indexed directly.
