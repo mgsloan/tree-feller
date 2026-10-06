@@ -40,11 +40,12 @@
 #define TF_ERROR_COST_PER_SKIPPED_LINE 30
 #define TF_MAX_COST_DIFFERENCE (18 * TF_ERROR_COST_PER_SKIPPED_TREE)
 
-// For tf_spec__replay; see there.
 #if defined(__GNUC__) || defined(__clang__)
 #define TF_NOINLINE __attribute__((noinline))
+#define TF_COLD __attribute__((cold))
 #else
 #define TF_NOINLINE
+#define TF_COLD
 #endif
 
 // `structural_count` is a production's child count, which the ABI stores in a uint8_t.

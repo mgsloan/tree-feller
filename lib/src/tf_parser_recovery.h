@@ -292,7 +292,8 @@ static bool tf_spec__recover_to_state(TFSpec *s, uint32_t version, uint32_t dept
   return previous != TF_SPEC_NONE;
 }
 
-static void tf_spec__recover(TFSpec *s, TFParser *p, uint32_t version, uint32_t lookahead) {
+// Keep recovery code out of the speculative parser's hot path.
+TF_COLD TF_NOINLINE static void tf_spec__recover(TFSpec *s, TFParser *p, uint32_t version, uint32_t lookahead) {
   bool recovered = false;
   uint32_t initial = s->head_count, progress = tf_spec__since_error(s, version);
   uint32_t cost = tf_spec__cost(s, version);
@@ -370,7 +371,7 @@ static void tf_spec__recover(TFSpec *s, TFParser *p, uint32_t version, uint32_t 
   if (token.external) s->heads[version].scanner_state = token.scanner_state;
 }
 
-static void tf_spec__handle_error(TFSpec *s, TFParser *p, uint32_t version, uint32_t lookahead) {
+TF_COLD TF_NOINLINE static void tf_spec__handle_error(TFSpec *s, TFParser *p, uint32_t version, uint32_t lookahead) {
   s->recovering = true;
   uint32_t initial = s->head_count;
   tf_spec__potential_reductions(s, p, version, 0);
