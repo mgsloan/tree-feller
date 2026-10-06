@@ -104,6 +104,7 @@ typedef struct {
   uint32_t byte;
   TFPoint point;
   char message[TF_ERROR_MESSAGE_SIZE];
+  bool canceled;
 } TFError;
 
 typedef struct {
@@ -124,6 +125,18 @@ typedef struct {
   uint32_t included_range_count;
 } TFInput;
 
+typedef struct {
+  void *payload;
+  uint32_t current_byte_offset;
+  bool has_error;
+} TFParseState;
+
+typedef struct {
+  void *payload;
+  // Checked periodically between parser operations. True cancels the parse.
+  bool (*progress_callback)(TFParseState *state);
+} TFParseOptions;
+
 // Parses all of `source`. On success, stores the root value in `*root`.
 // Syntax errors emit ERROR nodes and missing terminals. Returns false and fills
 // `*error` on allocation/input failures. `sink`, `root`, and `error` may
@@ -143,6 +156,12 @@ bool tf_parser_parse(TFParser *self, const TFLanguage *lang, const void *source,
                      const TFSink *sink, void **root, TFError *error);
 bool tf_parser_parse_with_callback(TFParser *self, const TFLanguage *lang, TFInput input,
                                    const TFSink *sink, void **root, TFError *error);
+// As above, with progress reporting and cancellation. Cancellation returns false,
+// sets error->canceled when error is non-NULL, and leaves the parser reusable.
+// A callback can run during private replays; its offset retains the outer position.
+bool tf_parser_parse_with_options(TFParser *self, const TFLanguage *lang, TFInput input,
+                                  const TFSink *sink, void **root, TFError *error,
+                                  TFParseOptions options);
 
 // ---------------------------------------------------------------------------
 // Input

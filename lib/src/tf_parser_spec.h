@@ -39,6 +39,7 @@
 #define TF_ERROR_COST_PER_SKIPPED_TREE 100
 #define TF_ERROR_COST_PER_SKIPPED_LINE 30
 #define TF_MAX_COST_DIFFERENCE (18 * TF_ERROR_COST_PER_SKIPPED_TREE)
+#define TF_PARSER_CALLBACK_INTERVAL 100
 
 #if defined(__GNUC__) || defined(__clang__)
 #define TF_NOINLINE __attribute__((noinline))
@@ -47,6 +48,24 @@
 #define TF_NOINLINE
 #define TF_COLD
 #endif
+
+TF_NOINLINE static bool tf_parser__report_progress(TFProgress *progress) {
+  progress->operation_count = 0;
+  progress->canceled = progress->options.progress_callback(&progress->state);
+  return !progress->canceled;
+}
+
+static TF_ALWAYS_INLINE bool tf_parser__check_progress(TFParser *p, const uint32_t *position,
+                                                       uint32_t operations) {
+  TFProgress *progress = p->progress;
+  if (!progress) return true;
+  if (progress->canceled) return false;
+  // Private reconstruction contributes work without rewinding reported progress.
+  if (position && !p->capture) progress->state.current_byte_offset = *position;
+  progress->operation_count += operations;
+  if (progress->operation_count < TF_PARSER_CALLBACK_INTERVAL) return true;
+  return tf_parser__report_progress(progress);
+}
 
 // `structural_count` is a production's child count, which the ABI stores in a uint8_t.
 typedef struct {
@@ -1006,6 +1025,11 @@ lex:
         .scanner_changed = s->cached_changed});
   }
   for (;;) {
+    uint32_t position = s->nodes[s->heads[version].node].byte;
+    if (!tf_parser__check_progress(p, &position, 1)) {
+      s->failed = true;
+      return;
+    }
     TSStateId state = s->nodes[s->heads[version].node].state;
     uint32_t count, last = TF_SPEC_NONE;
     const TSParseAction *actions = tf_actions(p->lang, state, token.symbol, &count);
@@ -1143,6 +1167,7 @@ TF_NOINLINE static bool tf_spec__replay(TFSpec *s, TFParser *p, uint32_t first, 
     // Descend into the leftmost child directly instead of pushing it and popping
     // it straight back: a left-recursive repetition is one such step per element.
     for (;;) {
+      if (!tf_parser__check_progress(p, NULL, 1)) return false;
       if (item & 0x80000000U) {
         const TFSpecTree *done = &s->trees[item & 0x7fffffffU];
         if (done->child_count > p->depth) return false;

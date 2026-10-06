@@ -11,6 +11,13 @@
 
 typedef struct TFSpec TFSpec;
 
+typedef struct {
+  TFParseOptions options;
+  TFParseState state;
+  uint32_t operation_count;
+  bool canceled;
+} TFProgress;
+
 struct TFParser {
   const TFLanguage *lang;
   TFLexer lexer;
@@ -37,6 +44,7 @@ struct TFParser {
   // Set on a private replay, which stops at this split's fork; see tf_spec__capture.
   TFSpec *capture;
   TFScanner *scanner;
+  TFProgress *progress;
 };
 
 static bool tf_parser__grow(TFParser *self, uint32_t needed) {
@@ -283,6 +291,10 @@ static TF_ALWAYS_INLINE bool tf_parser__parse(TFParser *self, void **root,
     // Reduce until the token can be shifted, or the parse ends.
     TFToken lexed_token = token;
     for (;;) {
+      if (self->progress) {
+        uint32_t position = self->depth ? self->nodes[self->depth - 1].end_byte : 0;
+        if (!tf_parser__check_progress(self, &position, 1)) return false;
+      }
       uint32_t count;
       const TSParseAction *actions = tf_actions(lang, state, token.symbol, &count);
       if (count == 0 && tf_parser__demote_keyword(lang, state, &token, self->lexer.token_is_keyword)) {
@@ -345,13 +357,14 @@ oom:
 
 static bool tf_parser__run(const TFLanguage *lang, const void *source, size_t size,
                            TFInputState *input, const TFSink *sink, void **root, TFError *error,
-                           TFSpec *capture, TFParser *storage) {
+                           TFSpec *capture, TFParser *storage, TFProgress *progress) {
   static const TFSink no_sink = {0};
   TFParser self = storage ? *storage : (TFParser){0};
   self.lang = lang;
   self.sink = sink ? sink : &no_sink;
   self.error = error;
   self.capture = capture;
+  self.progress = progress;
   if (error) {
     *error = (TFError){0};
   }
@@ -391,6 +404,12 @@ static bool tf_parser__run(const TFLanguage *lang, const void *source, size_t si
 oom:
   tf_parser__fail(&self, 0, (TFPoint){0}, "out of memory");
 done:
+  if (progress && progress->canceled) {
+    tf_parser__fail(&self, progress->state.current_byte_offset, self.lexer.point, "parse canceled");
+    if (error) error->canceled = true;
+    if (root) *root = NULL;
+    ok = false;
+  }
   if (input && input->overflow) {
     tf_parser__fail(&self, self.lexer.byte, self.lexer.point, "input is larger than 4 GiB");
     if (root) *root = NULL;
@@ -479,7 +498,8 @@ static bool tf_spec__materialize(TFSpec *s) {
     // The replay stops by failing once it has captured, so only `captured` counts.
     TFLexer *lexer = &s->owner->lexer;
     (void)tf_parser__run(s->owner->lang, lexer->input ? NULL : lexer->source,
-                         lexer->input ? 0 : lexer->size, lexer->input, &sink, NULL, NULL, s, NULL);
+                         lexer->input ? 0 : lexer->size, lexer->input, &sink, NULL, NULL, s, NULL,
+                         s->owner->progress);
     tf_lexer_refresh(lexer);
     if (!s->captured) {
       s->failed = true;
@@ -490,7 +510,7 @@ static bool tf_spec__materialize(TFSpec *s) {
 
 bool tf_parse(const TFLanguage *lang, const void *source, size_t size, const TFSink *sink,
               void **root, TFError *error) {
-  return tf_parser__run(lang, source, size, NULL, sink, root, error, NULL, NULL);
+  return tf_parser__run(lang, source, size, NULL, sink, root, error, NULL, NULL, NULL);
 }
 
 bool tf_parse_with_callback(const TFLanguage *lang, TFInput input, const TFSink *sink,
@@ -519,13 +539,21 @@ void tf_parser_delete(TFParser *self) {
 
 bool tf_parser_parse(TFParser *self, const TFLanguage *lang, const void *source, size_t size,
                      const TFSink *sink, void **root, TFError *error) {
-  return tf_parser__run(lang, source, size, NULL, sink, root, error, NULL, self);
+  return tf_parser__run(lang, source, size, NULL, sink, root, error, NULL, self, NULL);
 }
 
 bool tf_parser_parse_with_callback(TFParser *self, const TFLanguage *lang, TFInput input,
                                    const TFSink *sink, void **root, TFError *error) {
+  return tf_parser_parse_with_options(self, lang, input, sink, root, error, (TFParseOptions){0});
+}
+
+bool tf_parser_parse_with_options(TFParser *self, const TFLanguage *lang, TFInput input,
+                                  const TFSink *sink, void **root, TFError *error,
+                                  TFParseOptions options) {
   TFInputState state = {.input = input};
-  return tf_parser__run(lang, NULL, 0, &state, sink, root, error, NULL, self);
+  TFProgress progress = {.options = options, .state.payload = options.payload};
+  return tf_parser__run(lang, NULL, 0, &state, sink, root, error, NULL, self,
+                        options.progress_callback ? &progress : NULL);
 }
 
 #undef TF_SPEC_RESERVE

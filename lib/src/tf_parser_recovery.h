@@ -136,6 +136,10 @@ static bool tf_spec__potential_reductions(TFSpec *s, TFParser *p, uint32_t start
   TSParseAction *reductions = NULL;
   uint32_t capacity = 0;
   for (uint32_t iteration = 0; version < s->head_count && !s->failed; iteration++) {
+    if (!tf_parser__check_progress(p, NULL, 1)) {
+      s->failed = true;
+      break;
+    }
     bool merged = false;
     for (uint32_t j = initial; j < version; j++) {
       if (tf_spec__merge(s, j, version)) {
@@ -369,6 +373,16 @@ TF_COLD TF_NOINLINE static void tf_spec__recover(TFSpec *s, TFParser *p, uint32_
   if (s->failed) return;
   s->heads[version].node = tf_spec__push(s, s->heads[version].node, parent, 0);
   if (token.external) s->heads[version].scanner_state = token.scanner_state;
+  if (p->progress && !p->capture) {
+    bool has_error = true;
+    for (uint32_t i = 0; i < s->head_count; i++) {
+      if (!tf_spec__status(s, i).in_error) {
+        has_error = false;
+        break;
+      }
+    }
+    p->progress->state.has_error = has_error;
+  }
 }
 
 TF_COLD TF_NOINLINE static void tf_spec__handle_error(TFSpec *s, TFParser *p, uint32_t version, uint32_t lookahead) {
