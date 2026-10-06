@@ -64,11 +64,15 @@ typedef struct {
   TFPoint start_point;
   TFPoint end_point;
   void *value;
+  // Driver metadata retained with completed stack cells.
+  uint32_t visible_child_count, visible_descendant_count;
+  int64_t precedence;
 } TFNode;
 
 typedef struct {
   TSSymbol symbol;
   uint16_t production_id;
+  int32_t dynamic_precedence;
   bool extra;
   // Grammar children exclude extras. `children` contains `node_count` grammar
   // children and intervening extras, and is valid only during the callback.

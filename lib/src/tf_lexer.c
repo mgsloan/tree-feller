@@ -387,7 +387,7 @@ static bool tf_lexer__external(TFLexer *self, TSStateId state, TSLexerMode mode,
     // advance the parse state (e.g. indentation).
     if (self->token_end_byte > byte ||
         after->length != before->length || memcmp(after->data, before->data, after->length) ||
-        (!error_mode && tf_next_state(self->lang, state, symbol) != state)) {
+        (!error_mode && !self->disallow_empty && tf_next_state(self->lang, state, symbol) != state)) {
       self->data.result_symbol = symbol;
       scanner->current = scanner->before ^ 1;
       scanner->token_external = true;
@@ -423,23 +423,39 @@ static TF_ALWAYS_INLINE bool tf_lexer__next(TFLexer *self, TSStateId state, TFTo
     self->scanner->before = self->scanner->current;
     self->scanner->token_external = false;
   }
-  bool found = tf_lexer__scan(self, state, false, external);
-  if (!found && state != 0) {
-    // Mainline caches tokens from the error-state lexer even for failed GLR
-    // branches. Surviving branches can reuse their different token boundaries.
-    tf_lexer_seek(self, start_byte, start_point);
-    found = tf_lexer__scan(self, 0, true, external);
+  bool error_mode = state == 0, skipped_error = false;
+  uint32_t error_start = 0, error_end = 0;
+  TFPoint error_start_point = {0}, error_end_point = {0};
+  TSStateId lex_state = state;
+  for (;;) {
+    if (tf_lexer__scan(self, lex_state, error_mode, external)) break;
+    if (!error_mode) {
+      error_mode = true;
+      lex_state = 0;
+      tf_lexer_seek(self, start_byte, start_point);
+      continue;
+    }
+    if (!skipped_error) {
+      skipped_error = true;
+      error_start = error_end = self->token_start_byte;
+      error_start_point = error_end_point = self->token_start_point;
+    }
+    if (self->byte == error_end) {
+      if (self->data.eof(&self->data)) break;
+      self->data.advance(&self->data, false);
+    }
+    error_end = self->byte;
+    error_end_point = self->point;
   }
-  if (!found) {
-    // A failed lexer can have consumed a partial token. Return to its start
-    // and consume a code point so recovery preserves text and always advances.
-    tf_lexer_seek(self, self->token_start_byte, self->token_start_point);
+  if (skipped_error) {
     *out = (TFToken){.symbol = ts_builtin_sym_error,
-                     .start_byte = self->byte, .start_point = self->point};
-    if (!self->data.eof(&self->data)) self->data.advance(&self->data, false);
-    out->end_byte = self->byte;
-    out->end_point = self->point;
-    if (out->start_byte == out->end_byte) out->symbol = ts_builtin_sym_end;
+                     .start_byte = error_start, .end_byte = error_end,
+                     .start_point = error_start_point, .end_point = error_end_point};
+    if (external) {
+      self->scanner->current = self->scanner->before;
+      self->scanner->token_external = false;
+    }
+    tf_lexer_seek(self, error_end, error_end_point);
     return true;
   }
 
@@ -461,8 +477,9 @@ static TF_ALWAYS_INLINE bool tf_lexer__next(TFLexer *self, TSStateId state, TFTo
     tf_lexer__start(self);
     bool is_keyword = ts->keyword_lex_fn(&self->data, 0);
     tf_lexer__finish(self);
+    self->token_is_keyword = is_keyword;
     if (is_keyword && self->token_end_byte == out->end_byte &&
-        (tf_lookup(self->lang, state, self->data.result_symbol) != 0 ||
+        (tf_has_actions(self->lang, state, self->data.result_symbol) ||
          tf_is_reserved_word(self->lang, state, self->data.result_symbol))) {
       out->symbol = self->data.result_symbol;
       // Recorded because the substitution was judged against *this* state, and

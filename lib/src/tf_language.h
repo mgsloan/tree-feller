@@ -56,6 +56,11 @@ static inline const TSParseAction *tf_actions(const TFLanguage *self, TSStateId 
   return (const TSParseAction *)(entry + 1);
 }
 
+// Recovery and token caching consult the table before SHIFT_REPEAT filtering.
+static inline bool tf_has_actions(const TFLanguage *self, TSStateId state, TSSymbol symbol) {
+  return self->ts->parse_actions[tf_lookup(self, state, symbol)].entry.count > 0;
+}
+
 // language.c:142-162, verbatim -- including the fact that it does *not* skip
 // SHIFT_REPEAT actions, so it uses the unfiltered count.
 static inline TSStateId tf_next_state(const TFLanguage *self, TSStateId state, TSSymbol symbol) {

@@ -74,6 +74,7 @@ typedef struct {
   bool at_eof;
   TFScanner *scanner;
   uint32_t range_index;
+  bool disallow_empty;  // no progress since the last parse error
 } TFLexer;
 
 // The source is one contiguous buffer, indexed directly.
