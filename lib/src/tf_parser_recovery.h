@@ -403,9 +403,11 @@ TF_COLD TF_NOINLINE static void tf_spec__handle_error(TFSpec *s, TFParser *p, ui
       bool reduces = action_count && actions[0].type == TSParseActionTypeReduce;
       if (!reduces) continue;
       tf_lexer_seek(&p->lexer, position.byte, position.point);
+      // Preserve the preceding range's end when seeking crosses an excluded gap.
+      p->lexer.data.mark_end(&p->lexer.data);
       TFToken token = {.symbol = symbol, .missing = true,
-          .start_byte = p->lexer.byte, .end_byte = p->lexer.byte,
-          .start_point = p->lexer.point, .end_point = p->lexer.point};
+          .start_byte = p->lexer.token_end_byte, .end_byte = p->lexer.token_end_byte,
+          .start_point = p->lexer.token_end_point, .end_point = p->lexer.token_end_point};
       uint32_t missing = tf_spec__tree(s, (TFSpecTree){.token = token, .leaf = true,
           .padding_start = position.byte, .padding_point = position.point});
       TFSpecHead original = s->heads[v];

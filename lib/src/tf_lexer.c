@@ -359,6 +359,11 @@ static void tf_lexer__finish(TFLexer *self) {
   if (self->token_end_byte == TF_NO_END) {
     tf_lexer__mark_end(&self->data);
   }
+  // At an included-range boundary, mark_end can precede the token's start.
+  if (self->token_end_byte < self->token_start_byte) {
+    self->token_start_byte = self->token_end_byte;
+    self->token_start_point = self->token_end_point;
+  }
 }
 
 static inline bool tf_lexer__wasm_error(const TFLexer *self) {
@@ -396,11 +401,6 @@ static bool tf_lexer__external(TFLexer *self, TSStateId state, TSLexerMode mode,
     found = ts->external_scanner.scan(scanner->payload, &self->data, valid);
   }
   tf_lexer__finish(self);
-  // Scanners can mark an empty token before skipping its lookahead whitespace.
-  if (self->token_end_byte < self->token_start_byte) {
-    self->token_start_byte = self->token_end_byte;
-    self->token_start_point = self->token_end_point;
-  }
   if (found) {
 #ifdef TREE_FELLER_WASM
     if (self->wasm) {
