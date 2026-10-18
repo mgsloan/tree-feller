@@ -17,16 +17,17 @@
 #include <unistd.h>
 #endif
 
-static bool tf_file__fail(TFError *error, const char *path, const char *what, const char *why) {
+static bool tf_file__fail(TFError *error, TFErrorCode code, const char *path,
+                          const char *what, const char *why) {
   if (error) {
-    *error = (TFError){0};
+    *error = (TFError){.code = code};
     snprintf(error->message, TF_ERROR_MESSAGE_SIZE, "%s: %s: %s", path, what, why);
   }
   return false;
 }
 
 static bool tf_file__too_large(TFError *error, const char *path) {
-  return tf_file__fail(error, path, "cannot map",
+  return tf_file__fail(error, TF_ERROR_OVERFLOW, path, "cannot map",
                        "larger than the 4 GiB a byte offset can address");
 }
 
@@ -41,14 +42,14 @@ bool tf_file_open(TFFile *self, const char *path, TFError *error) {
                             FILE_ATTRIBUTE_NORMAL, NULL);
   if (file == INVALID_HANDLE_VALUE) {
     snprintf(why, sizeof(why), "error %lu", (unsigned long)GetLastError());
-    return tf_file__fail(error, path, "cannot open", why);
+    return tf_file__fail(error, TF_ERROR_IO, path, "cannot open", why);
   }
 
   LARGE_INTEGER size;
   if (!GetFileSizeEx(file, &size)) {
     snprintf(why, sizeof(why), "error %lu", (unsigned long)GetLastError());
     CloseHandle(file);
-    return tf_file__fail(error, path, "cannot size", why);
+    return tf_file__fail(error, TF_ERROR_IO, path, "cannot size", why);
   }
   if ((unsigned long long)size.QuadPart > UINT32_MAX) {
     CloseHandle(file);
@@ -65,27 +66,27 @@ bool tf_file_open(TFFile *self, const char *path, TFError *error) {
   CloseHandle(file);
   if (!mapping) {
     snprintf(why, sizeof(why), "error %lu", (unsigned long)GetLastError());
-    return tf_file__fail(error, path, "cannot map", why);
+    return tf_file__fail(error, TF_ERROR_IO, path, "cannot map", why);
   }
   void *data = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
   CloseHandle(mapping);  // the view holds its own reference
   if (!data) {
     snprintf(why, sizeof(why), "error %lu", (unsigned long)GetLastError());
-    return tf_file__fail(error, path, "cannot map", why);
+    return tf_file__fail(error, TF_ERROR_IO, path, "cannot map", why);
   }
   self->data = data;
   return true;
 #else
   int fd = open(path, O_RDONLY);
   if (fd < 0) {
-    return tf_file__fail(error, path, "cannot open", strerror(errno));
+    return tf_file__fail(error, TF_ERROR_IO, path, "cannot open", strerror(errno));
   }
 
   struct stat info;
   if (fstat(fd, &info) != 0) {
     int saved = errno;
     close(fd);
-    return tf_file__fail(error, path, "cannot stat", strerror(saved));
+    return tf_file__fail(error, TF_ERROR_IO, path, "cannot stat", strerror(saved));
   }
   if ((unsigned long long)info.st_size > UINT32_MAX) {
     close(fd);
@@ -103,7 +104,7 @@ bool tf_file_open(TFFile *self, const char *path, TFError *error) {
   int saved = errno;
   close(fd);
   if (data == MAP_FAILED) {
-    return tf_file__fail(error, path, "cannot map", strerror(saved));
+    return tf_file__fail(error, TF_ERROR_IO, path, "cannot map", strerror(saved));
   }
   self->data = data;
   return true;

@@ -105,11 +105,21 @@ typedef struct {
 
 #define TF_ERROR_MESSAGE_SIZE 512
 
+typedef enum {
+  TF_OK,
+  TF_ERROR_PARSE,
+  TF_ERROR_ALLOCATION,
+  TF_ERROR_OVERFLOW,
+  TF_ERROR_LANGUAGE,
+  TF_ERROR_CANCELED,
+  TF_ERROR_IO,
+} TFErrorCode;
+
 typedef struct {
   uint32_t byte;
   TFPoint point;
   char message[TF_ERROR_MESSAGE_SIZE];
-  bool canceled;
+  TFErrorCode code;
 } TFError;
 
 typedef struct {
@@ -169,7 +179,7 @@ bool tf_parser_parse(TFParser *self, const TFLanguage *lang, const void *source,
 bool tf_parser_parse_with_callback(TFParser *self, const TFLanguage *lang, TFInput input,
                                    const TFSink *sink, void **root, TFError *error);
 // As above, with progress reporting and cancellation. Cancellation returns false,
-// sets error->canceled when error is non-NULL, and leaves the parser reusable.
+// sets error->code to TF_ERROR_CANCELED when non-NULL, and leaves the parser reusable.
 // A callback can run during private replays; its offset retains the outer position.
 bool tf_parser_parse_with_options(TFParser *self, const TFLanguage *lang, TFInput input,
                                   const TFSink *sink, void **root, TFError *error,

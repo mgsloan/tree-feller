@@ -1403,7 +1403,7 @@ static bool tf_parser__split(TFParser *p, TFToken token, const TFToken *cached,
   } else {
     bool keyword;
     if (!tf_spec__lex(s, p, top, scanner_state, next, &keyword)) {
-      tf_parser__fail(p, s->error_byte, s->error_point, "unexpected character");
+      tf_parser__fail(p, TF_ERROR_PARSE, s->error_byte, s->error_point, "unexpected character");
       return false;
     }
     tf_lexer_seek(&p->lexer, next->end_byte, next->end_point);
@@ -1412,7 +1412,7 @@ static bool tf_parser__split(TFParser *p, TFToken token, const TFToken *cached,
   }
   return true;
 oom:
-  tf_parser__fail(p, token.start_byte, token.start_point, "out of memory");
+  tf_parser__fail(p, TF_ERROR_ALLOCATION, token.start_byte, token.start_point, "out of memory");
   return false;
 }
 #endif

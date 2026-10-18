@@ -114,10 +114,12 @@ static bool tf_parser__shift(TFParser *self, const TFToken *token, bool extra, T
   return tf_parser__push(self, node, state);
 }
 
-static void tf_parser__fail(TFParser *self, uint32_t byte, TFPoint point, const char *format, ...) {
+static void tf_parser__fail(TFParser *self, TFErrorCode code, uint32_t byte, TFPoint point,
+                            const char *format, ...) {
   if (!self->error) {
     return;
   }
+  self->error->code = code;
   self->error->byte = byte;
   self->error->point = point;
   va_list args;
@@ -287,7 +289,8 @@ static TF_ALWAYS_INLINE bool tf_parser__parse(TFParser *self, void **root,
       token = (TFToken){.start_byte = self->lexer.byte, .end_byte = self->lexer.byte,
                          .start_point = self->lexer.point, .end_point = self->lexer.point};
     } else if (!lex(&self->lexer, state, &token)) {
-      tf_parser__fail(self, self->lexer.byte, self->lexer.point, "unexpected character");
+      tf_parser__fail(self, TF_ERROR_PARSE, self->lexer.byte, self->lexer.point,
+                      "unexpected character");
       return false;
     }
 
@@ -354,7 +357,7 @@ static TF_ALWAYS_INLINE bool tf_parser__parse(TFParser *self, void **root,
   }
 
 oom:
-  tf_parser__fail(self, token.start_byte, token.start_point, "out of memory");
+  tf_parser__fail(self, TF_ERROR_ALLOCATION, token.start_byte, token.start_point, "out of memory");
   return false;
 }
 
@@ -375,7 +378,7 @@ static bool tf_parser__run(const TFLanguage *lang, const void *source, size_t si
     *root = NULL;
   }
   if (size > UINT32_MAX) {
-    tf_parser__fail(&self, 0, (TFPoint){0, 0}, "input is larger than 4 GiB");
+    tf_parser__fail(&self, TF_ERROR_OVERFLOW, 0, (TFPoint){0, 0}, "input is larger than 4 GiB");
     return false;
   }
   if (input) tf_lexer_init_with_callback(&self.lexer, lang, input);
@@ -387,14 +390,16 @@ static bool tf_parser__run(const TFLanguage *lang, const void *source, size_t si
   if (ts_language_is_wasm(lang->ts)) {
     if (capture) self.wasm = capture->owner->wasm;
     if (!self.wasm) {
-      tf_parser__fail(&self, 0, (TFPoint){0}, "WASM language requires a WASM store");
+      tf_parser__fail(&self, TF_ERROR_LANGUAGE, 0, (TFPoint){0},
+                      "WASM language requires a WASM store");
       return false;
     }
     previous_lexer = tf_wasm_lexer(self.wasm);
     self.lexer.wasm = self.wasm;
     if (!tf_wasm_start(self.wasm, &self.lexer.data, lang->ts, capture != NULL)) {
       tf_wasm_finish(self.wasm, previous_lexer);
-      tf_parser__fail(&self, 0, (TFPoint){0}, "failed to instantiate WASM language");
+      tf_parser__fail(&self, TF_ERROR_PARSE, 0, (TFPoint){0},
+                      "failed to instantiate WASM language");
       return false;
     }
     wasm_started = true;
@@ -430,17 +435,19 @@ static bool tf_parser__run(const TFLanguage *lang, const void *source, size_t si
   goto done;
 
 oom:
-  tf_parser__fail(&self, 0, (TFPoint){0}, "out of memory");
+  tf_parser__fail(&self, TF_ERROR_ALLOCATION, 0, (TFPoint){0}, "out of memory");
 done:
 #ifdef TREE_FELLER_WASM
   if (self.lexer.wasm && tf_wasm_has_error(self.wasm)) {
-    tf_parser__fail(&self, self.lexer.byte, self.lexer.point, "WASM lexer or scanner trapped");
+    tf_parser__fail(&self, TF_ERROR_PARSE, self.lexer.byte, self.lexer.point,
+                    "WASM lexer or scanner trapped");
     if (root) *root = NULL;
     ok = false;
   }
 #endif
   if (input && input->overflow) {
-    tf_parser__fail(&self, self.lexer.byte, self.lexer.point, "input is larger than 4 GiB");
+    tf_parser__fail(&self, TF_ERROR_OVERFLOW, self.lexer.byte, self.lexer.point,
+                    "input is larger than 4 GiB");
     if (root) *root = NULL;
     ok = false;
   }
@@ -449,7 +456,8 @@ done:
     if (self.lexer.wasm) {
       tf_wasm_scanner_destroy(self.wasm, (uint32_t)(uintptr_t)self.lexer.scanner->payload);
       if (tf_wasm_has_error(self.wasm)) {
-        tf_parser__fail(&self, self.lexer.byte, self.lexer.point, "WASM lexer or scanner trapped");
+        tf_parser__fail(&self, TF_ERROR_PARSE, self.lexer.byte, self.lexer.point,
+                        "WASM lexer or scanner trapped");
         if (root) *root = NULL;
         ok = false;
       }
@@ -461,8 +469,8 @@ done:
     self.lexer.scanner->payload = NULL;
   }
   if (progress && progress->canceled) {
-    tf_parser__fail(&self, progress->state.current_byte_offset, self.lexer.point, "parse canceled");
-    if (error) error->canceled = true;
+    tf_parser__fail(&self, TF_ERROR_CANCELED, progress->state.current_byte_offset, self.lexer.point,
+                    "parse canceled");
     if (root) *root = NULL;
     ok = false;
   }
@@ -501,6 +509,7 @@ done:
     free(self.scanner);
     tf_spec__free(self.spec);
   }
+  if (!ok && error && error->code == TF_OK) error->code = TF_ERROR_PARSE;
   return ok;
 }
 

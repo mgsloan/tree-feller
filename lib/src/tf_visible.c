@@ -361,6 +361,7 @@ bool tf_parse_visible(const TFLanguage *lang, const void *source, size_t size,
   if (ok && self.failed) {
     ok = false;
     if (error) {
+      error->code = TF_ERROR_ALLOCATION;
       snprintf(error->message, TF_ERROR_MESSAGE_SIZE, "out of memory");
     }
   }
