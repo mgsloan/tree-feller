@@ -1,20 +1,24 @@
-//! Malformed input must fail, with a position and a message. There is no
-//! recovery: one error, then the parse stops.
-//!
-//! That the failure lands at or before the byte where the grammar itself first
-//! goes wrong is checked against libtree-sitter in `differential.rs`, which has
-//! a reference tree to compare against; here the concern is only that a failure
-//! is reported at all and is usable.
+//! Syntax errors produce recovered nodes; allocation and input failures remain errors.
 use std::sync::OnceLock;
 use tree_feller::{Child, Language, Node, ParseError};
 
-fn parse(source: &str) -> Result<usize, ParseError> {
+fn parse(source: &str) -> Result<(usize, usize), ParseError> {
     static LANGUAGE: OnceLock<Language> = OnceLock::new();
     let language =
         LANGUAGE.get_or_init(|| Language::new(tree_sitter_c::LANGUAGE).expect("tables load"));
     language.parse(
         source.as_bytes(),
-        |_: Node<'_>, c: &mut Vec<Child<usize>>| c.drain(..).map(|k| k.value).sum::<usize>() + 1,
+        |node: Node<'_>, children: &mut Vec<Child<(usize, usize)>>| {
+            let mut total = (
+                1,
+                usize::from(node.symbol() == u16::MAX || node.is_missing()),
+            );
+            for child in children.drain(..) {
+                total.0 += child.value.0;
+                total.1 += child.value.1;
+            }
+            total
+        },
     )
 }
 
@@ -40,40 +44,18 @@ const WELL_FORMED: &[&str] = &[
 ];
 
 #[test]
-fn malformed_input_fails_with_a_position() {
+fn malformed_input_produces_error_nodes() {
     for source in MALFORMED {
-        let error = parse(source).expect_err(&format!("{source:?} was accepted"));
-        assert!(
-            error.byte as usize <= source.len(),
-            "{source:?}: byte {} is past the end",
-            error.byte
-        );
-        assert!(!error.message.is_empty(), "{source:?}: empty message");
-        assert!(
-            (error.point.row as usize) <= source.matches('\n').count(),
-            "{source:?}: row {} is past the end",
-            error.point.row
-        );
-        // `Display` is what a consumer will actually print.
-        assert!(!error.to_string().is_empty());
+        let (nodes, errors) = parse(source).unwrap_or_else(|error| panic!("{source:?}: {error}"));
+        assert!(nodes > 0);
+        assert!(errors > 0, "{source:?}: no ERROR or missing node");
     }
 }
 
 #[test]
-fn well_formed_input_is_accepted() {
+fn well_formed_input_has_no_error_nodes() {
     for source in WELL_FORMED {
-        parse(source).unwrap_or_else(|e| panic!("{source:?} rejected: {e}"));
+        let (_, errors) = parse(source).unwrap_or_else(|error| panic!("{source:?}: {error}"));
+        assert_eq!(errors, 0, "{source:?}");
     }
-}
-
-#[test]
-fn the_error_names_what_was_expected() {
-    // On a missing action the valid-token set is read off the state's table row,
-    // which is the difference between a usable message and "syntax error".
-    let error = parse("int int x;").unwrap_err();
-    assert!(
-        error.message.contains("expected one of"),
-        "unhelpful message: {}",
-        error.message
-    );
 }

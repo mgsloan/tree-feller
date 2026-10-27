@@ -43,6 +43,7 @@ const char *tf_language_field_name(const TFLanguage *self, TSFieldId field);
 // A terminal, as the lexer produced it.
 typedef struct {
   TSSymbol symbol;
+  bool missing;  // a zero-width terminal inserted during recovery
   uint32_t start_byte;
   uint32_t end_byte;
   TFPoint start_point;
@@ -52,17 +53,23 @@ typedef struct {
 // A shifted token or completed reduction on the parse stack.
 typedef struct {
   TSSymbol symbol;
-  bool extra;  // an `extra` token: whitespace or a comment, not a real child
+  bool extra;  // whitespace or a comment, excluded from grammar child counts
+  bool missing;
   uint32_t start_byte;
   uint32_t end_byte;
   TFPoint start_point;
   TFPoint end_point;
   void *value;
+  // Driver metadata retained with completed stack cells.
+  uint32_t visible_child_count, visible_descendant_count;
+  int64_t precedence;
 } TFNode;
 
 typedef struct {
   TSSymbol symbol;
   uint16_t production_id;
+  int32_t dynamic_precedence;
+  bool extra;
   // Grammar children exclude extras. `children` contains `node_count` grammar
   // children and intervening extras, and is valid only during the callback.
   uint32_t child_count;
@@ -95,8 +102,9 @@ typedef struct {
   char message[TF_ERROR_MESSAGE_SIZE];
 } TFError;
 
-// Parses all of `source`. On success, stores the root value in `*root`. On the
-// first error, returns false and fills `*error`. `sink`, `root`, and `error` may
+// Parses all of `source`. On success, stores the root value in `*root`.
+// Syntax errors emit ERROR nodes and missing terminals. Returns false and fills
+// `*error` on allocation/input failures. `sink`, `root`, and `error` may
 // be NULL. Inputs above 4 GiB fail instead of being truncated.
 bool tf_parse(const TFLanguage *lang, const void *source, size_t size, const TFSink *sink,
               void **root, TFError *error);
@@ -140,6 +148,7 @@ typedef struct {
   uint16_t production_id;
   bool named;
   bool extra;
+  bool missing;
   uint32_t start_byte;
   uint32_t end_byte;
   TFPoint start_point;

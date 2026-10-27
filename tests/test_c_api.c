@@ -111,7 +111,7 @@ int main(void) {
   }
 
   CHECK(tf_language_symbol_name(lang, 1) != NULL, "symbol 1 has no name");
-  CHECK(tf_language_symbol_name(lang, 0xFFFF) == NULL, "out-of-range symbol got a name");
+  CHECK(tf_language_symbol_name(lang, 0xFFFD) == NULL, "out-of-range symbol got a name");
   CHECK(tf_language_field_name(lang, 0xFFFF) == NULL, "out-of-range field got a name");
 
   TFError error;
@@ -145,12 +145,17 @@ int main(void) {
   CHECK(folded_runs > 0, "nothing was offered to fold");
   CHECK(visible_nodes < all_nodes, "named_only reported as many nodes as a full walk");
 
-  // Nothing built before a failure is dropped on the floor.
+  // Recovered parses transfer every allocated value to a parent or the caller.
   handed_out = handed_back = 0;
   TFVisibleSink allocating = {.on_node = on_node_alloc, .on_discard = on_discard};
-  CHECK(!tf_parse_visible(lang, "int a = 1; int int b;", 21, &allocating, NULL, &error),
-        "malformed input was accepted");
-  CHECK(handed_out > 0, "nothing was built before the failure");
+  void *allocated_root = NULL;
+  CHECK(tf_parse_visible(lang, "int a = 1; int int b;", 21, &allocating, &allocated_root, &error),
+        "malformed input did not recover");
+  if (allocated_root) {
+    free(allocated_root);
+    handed_back++;
+  }
+  CHECK(handed_out > 0, "no values were built");
   CHECK(handed_out == handed_back, "%u values built, %u handed back", handed_out, handed_back);
 
   // A length that does not fit a byte offset is refused, not truncated.
@@ -160,10 +165,8 @@ int main(void) {
   // A sink is optional; parsing with none is how you measure the driver alone.
   CHECK(tf_parse(lang, source, size, NULL, NULL, &error), "sinkless parse failed");
 
-  // Failure carries a position and a message.
-  CHECK(!tf_parse(lang, "int int x;", 10, NULL, NULL, &error), "malformed input was accepted");
-  CHECK(error.message[0] != '\0', "no message on failure");
-  CHECK(error.byte <= 10, "error byte past the end");
+  // Syntax errors recover even without a sink.
+  CHECK(tf_parse(lang, "int int x;", 10, NULL, NULL, &error), "malformed input did not recover");
 
   // Mapping a file, and the error path when there is none.
   TFFile file;

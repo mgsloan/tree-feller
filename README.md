@@ -6,7 +6,7 @@ tree-sitter keeps a concrete syntax tree (CST) for incremental editing and error
 recovery. tree-feller drives the same generated lexer and parse tables and reports
 reductions as they finish. Conflicts retain private alternatives and can replay a
 prefix to resolve structural ties. It builds no
-`TSTree` or `TSNode` and stops at the first error.
+`TSTree` or `TSNode` and recovers from syntax errors.
 
 On a 312 MB MiniZinc data corpus:
 
@@ -129,20 +129,23 @@ reassemble the tree from child values and walk it (see `tools/tf_diff.c`).
 
 ## Errors
 
-Parsing stops at the first missing action and reports the valid tokens, for example:
+Syntax errors produce `ERROR` nodes and zero-width missing terminals. Recovery
+uses Tree-sitter 0.27's error costs, stack summaries, and competing repairs.
+`tf_parse` returns false for allocation or input failures. Rust visitors can inspect
+inserted terminals with `Node::is_missing`.
 
-```text
-1:3: expected one of {)}, found end of file
-```
+Recovery is always enabled. Ordinary reductions retain visibility counts and
+precedence; after recovery starts, parsing stays speculative through end of input.
+Visible-stream recovery has known parity differences from Tree-sitter.
+Only `\n` advances the row, and columns count bytes.
 
-There is no recovery or `ERROR` node. As in tree-sitter, only `\n` advances the row and
-columns count bytes. Declared conflicts use value-free graph-structured stacks, with tree-sitter's
+Declared conflicts use value-free graph-structured stacks, with tree-sitter's
 limits and ordering for speculative alternatives. Structural ties can require
 a private replay of the prefix; consumer callbacks run only for the selected tree.
 
 ## Limits
 
-- No incremental parsing, tree, `TSNode` API, queries, or recovery.
+- No incremental parsing, tree, `TSNode` API, or queries.
 - No external scanners; this excludes Python, Ruby, Rust, Bash, and many other grammars.
 - ABI 15 only; non-terminal extras are unsupported.
 - Inputs must fit in 4 GiB because byte offsets are `uint32_t`.

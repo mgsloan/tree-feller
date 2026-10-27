@@ -107,6 +107,10 @@ impl Node<'_> {
     pub fn is_extra(&self) -> bool {
         self.raw.extra
     }
+    /// A zero-width terminal inserted during recovery.
+    pub fn is_missing(&self) -> bool {
+        self.raw.missing
+    }
     /// Byte offsets of the node in the source.
     pub fn byte_range(&self) -> std::ops::Range<u32> {
         self.raw.start_byte..self.raw.end_byte

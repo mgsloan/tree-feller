@@ -241,6 +241,7 @@ fail:
 }
 
 const char *tf_language_symbol_name(const TFLanguage *self, TSSymbol symbol) {
+  if (symbol == ts_builtin_sym_error) return "ERROR";
   if (symbol == ts_builtin_sym_end) {
     return "end of file";
   }

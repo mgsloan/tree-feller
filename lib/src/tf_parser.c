@@ -83,9 +83,11 @@ static inline void *tf_parser__emit_reduce(const TFParser *self, const TFReducti
 }
 
 static bool tf_parser__shift(TFParser *self, const TFToken *token, bool extra, TSStateId state) {
+  if (self->depth == UINT32_MAX || !tf_parser__grow(self, self->depth + 1)) return false;
   TFNode node = {
       .symbol = token->symbol,
       .extra = extra,
+      .missing = token->missing,
       .start_byte = token->start_byte,
       .end_byte = token->end_byte,
       .start_point = token->start_point,
@@ -110,53 +112,19 @@ static void tf_parser__fail(TFParser *self, uint32_t byte, TFPoint point, const 
   va_end(args);
 }
 
-static const char *tf_parser__symbol_name(const TFLanguage *lang, TSSymbol symbol) {
-  const char *name = tf_language_symbol_name(lang, symbol);
-  return name ? name : "?";
-}
-
-// The tokens that would have been accepted here. tree-sitter has a lookahead
-// iterator (language.h:109-178) that exploits the small table's structure; this
-// runs once per parse, at the point where it is about to stop, so a plain scan
-// over the terminals is enough and is a tenth of the code.
-static void tf_parser__describe_expected(const TFLanguage *lang, TSStateId state, char *out,
-                                         size_t size) {
-  size_t used = 0;
-  unsigned found = 0;
-  for (uint32_t symbol = 0; symbol < lang->ts->token_count; symbol++) {
-    uint32_t count;
-    tf_actions(lang, state, symbol, &count);
-    if (count == 0) {
-      continue;
-    }
-    const char *name = tf_parser__symbol_name(lang, symbol);
-    int written = snprintf(out + used, size - used, "%s%s", found++ ? ", " : "", name);
-    if (written < 0 || (size_t)written >= size - used) {
-      snprintf(out + (used > 4 ? used - 4 : 0), size - (used > 4 ? used - 4 : 0), ", ...");
-      return;
-    }
-    used += (size_t)written;
-  }
-}
-
-static void tf_parser__fail_unexpected(TFParser *self, TSStateId state, const TFToken *token) {
-  char expected[TF_ERROR_MESSAGE_SIZE / 2];
-  tf_parser__describe_expected(self->lang, state, expected, sizeof(expected));
-  tf_parser__fail(self, token->start_byte, token->start_point, "expected one of {%s}, found %s",
-                  expected, tf_parser__symbol_name(self->lang, token->symbol));
-}
-
 // parser.c:/ts_parser__reduce/, with the GLR bookkeeping removed. Pops
 // `child_count` non-extra cells -- carrying along any extras between them --
 // hands them to the sink, and pushes the result in their place. `lookahead` is
 // the token that will follow, where the caller knows it.
 static bool tf_parser__reduce(TFParser *self, TSSymbol symbol, uint32_t child_count,
-                              uint16_t production_id, const TFToken *lookahead) {
+                              uint16_t production_id, int32_t dynamic_precedence,
+                              const TFToken *lookahead) {
   // The extras above the last real child are exactly the run this scan crosses
   // before it reaches one, so counting them here saves walking the top of the
   // stack a second time.
   uint32_t popped = 0, trailing_count = 0;
   for (uint32_t structural = 0; structural < child_count;) {
+    if (popped == self->depth) return false;
     popped++;
     if (!self->nodes[self->depth - popped].extra) {
       structural++;
@@ -166,10 +134,12 @@ static bool tf_parser__reduce(TFParser *self, TSSymbol symbol, uint32_t child_co
   }
   uint32_t base = self->depth - popped;
   uint32_t end = self->depth - trailing_count;
+  if (!tf_parser__grow(self, base + 1 + trailing_count)) return false;
 
   TFReduction reduction = {
       .symbol = symbol,
       .production_id = production_id,
+      .dynamic_precedence = dynamic_precedence,
       .child_count = child_count,
       .node_count = end - base,
       .children = &self->nodes[base],
@@ -228,6 +198,22 @@ static bool tf_parser__reduce(TFParser *self, TSSymbol symbol, uint32_t child_co
     reduction.end_byte = lookahead->end_byte;
     reduction.end_point = lookahead->end_point;
   }
+  const TSSymbol *aliases = tf_alias_sequence(self->lang, production_id);
+  uint32_t structural_index = 0;
+  parent.precedence = dynamic_precedence;
+  for (uint32_t i = 0; i < reduction.node_count; i++) {
+    const TFNode *child = &reduction.children[i];
+    parent.precedence += child->precedence;
+    parent.visible_descendant_count += child->visible_descendant_count;
+    bool aliased = !child->extra && child->symbol && aliases && aliases[structural_index];
+    if (aliased || tf_symbol_metadata(self->lang, child->symbol).visible) {
+      parent.visible_child_count++;
+      parent.visible_descendant_count++;
+    } else {
+      parent.visible_child_count += child->visible_child_count;
+    }
+    structural_index += !child->extra;
+  }
   parent.value = tf_parser__emit_reduce(self, &reduction);
 
   // The parent takes the cell at `base`, and the trailing extras excluded from it
@@ -258,9 +244,7 @@ static bool tf_parser__demote_keyword(const TFLanguage *lang, TSStateId state, T
   if (tf_is_reserved_word(lang, state, token->symbol)) {
     return false;
   }
-  uint32_t count;
-  tf_actions(lang, state, ts->keyword_capture_token, &count);
-  if (count == 0) {
+  if (!tf_has_actions(lang, state, ts->keyword_capture_token)) {
     return false;
   }
   token->symbol = ts->keyword_capture_token;
@@ -304,21 +288,22 @@ static bool tf_parser__run(const TFLanguage *lang, const void *source, size_t si
     }
 
     // Reduce until the token can be shifted, or the parse ends.
+    TFToken lexed_token = token;
     for (;;) {
       uint32_t count;
       const TSParseAction *actions = tf_actions(lang, state, token.symbol, &count);
-      if (count == 0) {
-        if (tf_parser__demote_keyword(lang, state, &token, self.lexer.token_is_keyword)) {
-          continue;
-        }
-        tf_parser__fail_unexpected(&self, state, &token);
-        goto done;
+      if (count == 0 && tf_parser__demote_keyword(lang, state, &token, self.lexer.token_is_keyword)) {
+        continue;
       }
-      if (count > 1) {
-        // The tables cannot decide here; work it out speculatively and replay.
-        if (!tf_parser__split(&self, token, &token)) {
+      if (count != 1 || actions[0].type == TSParseActionTypeRecover) {
+        bool finished;
+        if (!tf_parser__split(&self, token, &lexed_token, &token, &finished)) goto done;
+        if (finished) {
+          if (root) *root = self.nodes[0].value;
+          ok = true;
           goto done;
         }
+        lexed_token = token;
         state = self.states[self.depth];
         continue;
       }
@@ -335,7 +320,7 @@ static bool tf_parser__run(const TFLanguage *lang, const void *source, size_t si
 
       if (action.type == TSParseActionTypeReduce) {
         if (!tf_parser__reduce(&self, action.reduce.symbol, action.reduce.child_count,
-                               action.reduce.production_id, &token)) {
+                               action.reduce.production_id, action.reduce.dynamic_precedence, &token)) {
           goto oom;
         }
         state = self.states[self.depth];
@@ -354,8 +339,6 @@ static bool tf_parser__run(const TFLanguage *lang, const void *source, size_t si
         goto done;
       }
 
-      // TSParseActionTypeRecover: error recovery, which tree-feller does not do.
-      tf_parser__fail_unexpected(&self, state, &token);
       goto done;
     }
   }
@@ -363,6 +346,13 @@ static bool tf_parser__run(const TFLanguage *lang, const void *source, size_t si
 oom:
   tf_parser__fail(&self, token.start_byte, token.start_point, "out of memory");
 done:
+  if (!ok && self.spec && self.spec->replay_pending && self.sink->on_discard) {
+    for (uint32_t i = self.spec->prefix_left; i < self.spec->prefix_depth; i++) {
+      void *value = self.spec->replay_prefix[i].value;
+      if (value) self.sink->on_discard(self.sink->payload, value);
+    }
+  }
+  if (self.spec) self.spec->replay_pending = false;
   // A failed parse has no root to hand the consumer, so anything it built is
   // otherwise dropped on the floor. Give it back before the stack goes away.
   if (!ok && self.sink->on_discard) {
@@ -398,13 +388,14 @@ static void *tf_capture__reduce(void *payload, const TFReduction *reduction) {
   for (uint32_t i = 0; i < reduction->node_count; i++) {
     s->children[s->child_count++] = (uint32_t)(uintptr_t)reduction->children[i].value - 1;
   }
-  uint32_t id = tf_spec__tree(s, (TFSpecTree){.token = {.symbol = reduction->symbol,
-                                                        .start_byte = reduction->start_byte,
-                                                        .end_byte = reduction->end_byte,
-                                                        .start_point = reduction->start_point,
-                                                        .end_point = reduction->end_point},
-                                              .first_child = first,
-                                              .child_count = reduction->node_count});
+  TFSpecTree tree = {.token = {.symbol = reduction->symbol,
+      .start_byte = reduction->start_byte, .end_byte = reduction->end_byte,
+      .start_point = reduction->start_point, .end_point = reduction->end_point},
+      .first_child = first, .extra = reduction->extra, .child_count = reduction->node_count,
+      .structural_count = reduction->child_count, .production_id = reduction->production_id};
+  tf_spec__summarize_tree(s, &tree);
+  tree.precedence += reduction->dynamic_precedence;
+  uint32_t id = tf_spec__tree(s, tree);
   // Stable arena handle carried in the sink value; never dereferenced.
   // NOLINTNEXTLINE(performance-no-int-to-ptr)
   return s->failed ? NULL : (void *)(uintptr_t)(id + 1);

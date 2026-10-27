@@ -68,6 +68,7 @@ pub struct TFVisibleNode {
     pub production_id: u16,
     pub named: bool,
     pub extra: bool,
+    pub missing: bool,
     pub start_byte: u32,
     pub end_byte: u32,
     pub start_point: TFPoint,
@@ -113,7 +114,7 @@ extern "C" {
 
     /// Parses `source`, reporting to `sink` every visible node a CST walk
     /// would visit, each after its own children but not in a walk's order.
-    /// Returns false and fills `error` on the first parse error.
+    /// Syntax errors recover; allocation and input failures fill `error`.
     pub fn tf_parse_visible(
         language: *const TFLanguage,
         source: *const c_void,

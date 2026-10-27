@@ -153,15 +153,46 @@ static void tf_lexer__finish(TFLexer *self) {
 bool tf_lexer_next(TFLexer *self, TSStateId state, TFToken *out) {
   const TSLanguage *ts = self->lang->ts;
 
+  uint32_t start_byte = self->byte;
+  TFPoint start_point = self->point;
   self->token_is_keyword = false;
   self->token_lex_state = state;
-  tf_lexer__start(self);
-  bool found = ts->lex_fn(&self->data, tf_lex_mode(self->lang, state).lex_state);
-  tf_lexer__finish(self);
-  if (!found) {
-    return false;
+  bool error_mode = state == 0, skipped_error = false;
+  uint32_t error_start = 0, error_end = 0;
+  TFPoint error_start_point = {0}, error_end_point = {0};
+  TSStateId lex_state = state;
+  for (;;) {
+    tf_lexer__start(self);
+    bool found = ts->lex_fn(&self->data, tf_lex_mode(self->lang, lex_state).lex_state);
+    tf_lexer__finish(self);
+    if (found) break;
+    if (!error_mode) {
+      error_mode = true;
+      lex_state = 0;
+      tf_lexer_seek(self, start_byte, start_point);
+      continue;
+    }
+    if (!skipped_error) {
+      skipped_error = true;
+      error_start = error_end = self->token_start_byte;
+      error_start_point = error_end_point = self->token_start_point;
+    }
+    if (self->byte == error_end) {
+      if (self->data.eof(&self->data)) break;
+      self->data.advance(&self->data, false);
+    }
+    error_end = self->byte;
+    error_end_point = self->point;
+  }
+  if (skipped_error) {
+    *out = (TFToken){.symbol = ts_builtin_sym_error,
+                     .start_byte = error_start, .end_byte = error_end,
+                     .start_point = error_start_point, .end_point = error_end_point};
+    tf_lexer_seek(self, error_end, error_end_point);
+    return true;
   }
 
+  out->missing = false;
   out->symbol = self->data.result_symbol;
   out->start_byte = self->token_start_byte;
   out->start_point = self->token_start_point;
@@ -178,8 +209,9 @@ bool tf_lexer_next(TFLexer *self, TSStateId state, TFToken *out) {
     tf_lexer__start(self);
     bool is_keyword = ts->keyword_lex_fn(&self->data, 0);
     tf_lexer__finish(self);
+    self->token_is_keyword = is_keyword;
     if (is_keyword && self->token_end_byte == out->end_byte &&
-        (tf_lookup(self->lang, state, self->data.result_symbol) != 0 ||
+        (tf_has_actions(self->lang, state, self->data.result_symbol) ||
          tf_is_reserved_word(self->lang, state, self->data.result_symbol))) {
       out->symbol = self->data.result_symbol;
       // Recorded because the substitution was judged against *this* state, and

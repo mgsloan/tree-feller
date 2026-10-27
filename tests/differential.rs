@@ -14,6 +14,7 @@ struct Record {
     field_id: u16,
     named: bool,
     extra: bool,
+    missing: bool,
     start_byte: u32,
     end_byte: u32,
     start_row: u32,
@@ -64,11 +65,6 @@ impl Grammar {
     }
 }
 
-/// A visitor that keeps nothing, for parses where only success matters.
-fn discard(_: Node<'_>, children: &mut Vec<Child<()>>) {
-    children.clear()
-}
-
 /// The reference: every visible node, in post-order.
 fn walk(cursor: &mut TreeCursor<'_>, out: &mut Vec<Record>) {
     let node = cursor.node();
@@ -89,6 +85,7 @@ fn walk(cursor: &mut TreeCursor<'_>, out: &mut Vec<Record>) {
         field_id: cursor.field_id().map_or(0, |id| id.get()),
         named: node.is_named(),
         extra: node.is_extra(),
+        missing: node.is_missing(),
         start_byte: node.start_byte() as u32,
         end_byte: node.end_byte() as u32,
         start_row: start.row as u32,
@@ -120,6 +117,7 @@ fn subject(language: &Language, source: &[u8]) -> Result<Vec<Record>, tree_felle
                 field_id: 0,
                 named: node.is_named(),
                 extra: node.is_extra(),
+                missing: node.is_missing(),
                 start_byte: node.byte_range().start,
                 end_byte: node.byte_range().end,
                 start_row: node.start_point().row,
@@ -149,8 +147,7 @@ fn subject(language: &Language, source: &[u8]) -> Result<Vec<Record>, tree_felle
     Ok(out)
 }
 
-/// Returns false when the reference parser could not parse it either, which is
-/// not a result about tree-feller.
+/// Compares recovered trees too; returns whether the source is valid.
 fn compare(grammar: Grammar, label: &str, source: &[u8]) -> bool {
     let ts = grammar.tree_sitter();
     let mut parser = Parser::new();
@@ -158,13 +155,7 @@ fn compare(grammar: Grammar, label: &str, source: &[u8]) -> bool {
     let tree = parser.parse(source, None).expect("reference parse");
 
     let language = grammar.tree_feller();
-    if tree.root_node().has_error() {
-        assert!(
-            language.parse(source, discard).is_err(),
-            "{label}: accepted input the reference parser could not parse",
-        );
-        return false;
-    }
+    let invalid = tree.root_node().has_error();
 
     let mut expected = Vec::new();
     walk(&mut tree.walk(), &mut expected);
@@ -180,7 +171,7 @@ fn compare(grammar: Grammar, label: &str, source: &[u8]) -> bool {
         );
     }
     assert_eq!(expected.len(), actual.len(), "{label}: node count");
-    true
+    !invalid
 }
 
 const C: &[&str] = &[
@@ -323,7 +314,7 @@ fn systemverilog_deep_and_wide_matches_tree_sitter() {
 }
 
 #[test]
-fn systemverilog_incomplete_directives_fail_at_eof() {
+fn systemverilog_incomplete_directives_recover() {
     for source in [
         include_bytes!("fixtures/systemverilog/pragma_eof.sv").as_slice(),
         include_bytes!("fixtures/systemverilog/line_eof.sv").as_slice(),
@@ -333,16 +324,11 @@ fn systemverilog_incomplete_directives_fail_at_eof() {
             "incomplete directive",
             source
         ));
-        let error = Grammar::SystemVerilog
-            .tree_feller()
-            .parse(source, discard)
-            .expect_err("missing directive argument");
-        assert_eq!(error.byte as usize, source.len());
     }
 }
 
 // Reduced from the outlier-grammar audit. These assert reference acceptance
-// and tree equality for valid inputs, and rejection for malformed inputs.
+// and tree equality for valid inputs, including recovery for malformed inputs.
 macro_rules! systemverilog_regression {
     ($name:ident, $fixture:literal, $reason:literal, $valid:expr) => {
         #[test]
@@ -436,4 +422,26 @@ fn callbacks_need_not_follow_tree_walk_order() {
     // The comment follows a later token in the stream, unlike a post-order walk.
     let comment = spans.iter().position(|span| *span == (7..12)).unwrap();
     assert!(spans[..comment].iter().any(|span| span.start >= 12));
+}
+
+#[test]
+fn recovery_mutations_match_tree_sitter() {
+    for (grammar, sources) in [(Grammar::C, C)] {
+        for (case, source) in sources.iter().enumerate() {
+            for mutation in 0..16 {
+                let position = (mutation * 7919 + case * 101) % (source.len() + 1);
+                let mut bytes = source.as_bytes().to_vec();
+                if mutation % 2 == 0 {
+                    bytes.truncate(position);
+                } else if position < bytes.len() {
+                    bytes.remove(position);
+                }
+                compare(
+                    grammar,
+                    &format!("case {case}, mutation {mutation}"),
+                    &bytes,
+                );
+            }
+        }
+    }
 }
