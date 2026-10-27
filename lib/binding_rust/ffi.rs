@@ -9,6 +9,20 @@ use std::ffi::{c_char, c_void};
 /// Fixed byte size of `TFError::message` below.
 pub const TF_ERROR_MESSAGE_SIZE: usize = 512;
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum TFErrorCode {
+    #[default]
+    TF_OK,
+    TF_ERROR_PARSE,
+    TF_ERROR_ALLOCATION,
+    TF_ERROR_OVERFLOW,
+    TF_ERROR_LANGUAGE,
+    TF_ERROR_CANCELED,
+    TF_ERROR_IO,
+}
+
 /// Opaque handle to a loaded language, owned until passed to
 /// `tf_language_free`.
 pub enum TFLanguage {}
@@ -29,6 +43,7 @@ pub struct TFError {
     pub byte: u32,
     pub point: TFPoint,
     pub message: [c_char; TF_ERROR_MESSAGE_SIZE],
+    pub code: TFErrorCode,
 }
 
 impl Default for TFError {
@@ -37,6 +52,7 @@ impl Default for TFError {
             byte: 0,
             point: TFPoint::default(),
             message: [0; TF_ERROR_MESSAGE_SIZE],
+            code: TFErrorCode::TF_OK,
         }
     }
 }
@@ -68,6 +84,7 @@ pub struct TFVisibleNode {
     pub production_id: u16,
     pub named: bool,
     pub extra: bool,
+    pub missing: bool,
     pub start_byte: u32,
     pub end_byte: u32,
     pub start_point: TFPoint,
