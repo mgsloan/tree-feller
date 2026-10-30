@@ -33,32 +33,12 @@ necessarily in tree-walk order.
 
 | Area | Remaining work |
 | --- | --- |
-| Visible recovery output | Fix known recovered-tree differences in `tf_parse_visible`, then expand differential coverage. Matching raw reductions alone does not establish visible-node parity. |
 | Recovery decisions | Continue comparing malformed inputs against the pinned Tree-sitter runtime: repair ranking, nested errors, missing terminals, scanner state, and included-range boundaries. The port is not a proof of equivalence for all grammars and inputs. |
 | Standalone tests | Bring the relevant tree-squatter property tests and reduced regressions into this fork. Existing upstream tests still expect malformed input to fail; update them to compare recovered trees and flags instead. |
 | Input encodings | Add UTF-16 LE/BE and custom decoding for parity with Tree-sitter's input API. This driver currently reads UTF-8 only. |
 | Interrupted parses | Cancellation allows a fresh parse using the same storage; it does not retain an execution that can resume where it stopped. |
 | Grammar acceptance | Full compatibility also requires handling grammars rejected by the dense-table size cap or the requirement that filtered repeat shifts trail other actions. Supporting an ABI does not guarantee every grammar using it is accepted. |
-| Rust API | Expose reusable parsers, callback input, ranges, cancellation, typed errors, and missing-node metadata through the safe wrapper. Most new C entry points are not bound yet. |
 | WASM integration | Wire the runtime, private headers, and `tf_wasm.c` into standalone CMake/Cargo builds. The source hooks exist, but the default builds do not enable them. |
-
-One known visible-stream discrepancy is this truncated Go input:
-
-```go
-package main
-
-func f(x any) { switch v := x.(type) { case int: _
-```
-
-The fork's visible stream differed from a Tree-sitter cursor walk. Both fork
-versions produced the same raw fingerprint as PR #10 for this input, but their
-visible fingerprints differed from PR #10. Tree-squatter's packed-tree tests
-exercise a different sink and do not cover that standalone filtering discrepancy.
-
-Incremental reparsing, old-tree reuse, and the persistent `TSTree`/`TSNode` API are
-outside tree-feller's streaming design. Reusing parser scratch does not provide
-incremental parsing. These are architectural differences, not missing recovery
-cases.
 
 ## Recovery performance
 
